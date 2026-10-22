@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>app.langg.Langg</string>
+  <key>CFBundleName</key><string>Langg</string>
+  <key>CFBundleDisplayName</key><string>Langg</string>
+  <key>CFBundleExecutable</key><string>Langg</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>0.2.2</string>
+  <key>CFBundleVersion</key><string>8</string>
+  <key>LSUIElement</key><true/>
+  <key>NSHumanReadableCopyright</key><string>© 2026 Langg</string>
+  <key>NSAccessibilityUsageDescription</key><string>Langg исправляет раскладку в доступных полях ввода и показывает уведомление рядом с курсором.</string>
+  <key>NSInputMonitoringUsageDescription</key><string>Langg замечает завершение слова и горячие клавиши для исправления раскладки. Текст и нажатия клавиш не сохраняются.</string>
+  <key>LSMinimumSystemVersion</key><string>14.0</string>
+  <key>SUFeedURL</key><string>https://github.com/frlvv/Langg/releases/latest/download/appcast.xml</string>
+  <key>SUPublicEDKey</key><string>PgHwGRksGOeW2suJCb74Xcjw3GTSO6Ko6o3k18qJrX0=</string>
+  <key>SUEnableAutomaticChecks</key><true/>
+  <key>SUAutomaticallyUpdate</key><false/>
+  <key>SUEnableSystemProfiling</key><false/>
+  <key>SUSendProfileInfo</key><false/>
+  <key>SUVerifyUpdateBeforeExtraction</key><true/>
+</dict></plist>

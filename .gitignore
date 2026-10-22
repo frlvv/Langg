@@ -1,0 +1,15 @@
+.build/
+build/
+DerivedData/
+*.swiftpm/
+Packages/
+.DS_Store
+
+dist/
+*.p12
+*.p8
+*.key
+*.pem
+*.keychain-db
+.env
+.env.*
