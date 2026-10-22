@@ -201,7 +201,11 @@ struct TextSnapshot {
     }
 
     static func textBounds(_ snapshot: TextSnapshot, range: NSRange) -> CGRect? {
-        textBounds(snapshot.element, text: snapshot.text, range: range)
+        if let direct = textBounds(snapshot.element, text: snapshot.text, range: range) { return direct }
+        guard let leading = TextGeometry.leadingCharacter(in: snapshot.text, range: range) else { return nil }
+        let result = FocusedTextGeometry.bounds(snapshot.element, text: snapshot.text, editedRange: range, leading: leading)
+        InputDiagnostics.record(result == nil ? "descendantBoundsUnavailable" : "descendantBoundsFound")
+        return result
     }
 
     private static func textBounds(_ element: AXUIElement, text: String, range: NSRange) -> CGRect? {
@@ -266,5 +270,108 @@ struct TextSnapshot {
         var result = CFRange(location: 0, length: 0)
         guard AXValueGetValue(unsafeBitCast(value, to: AXValue.self), .cfRange, &result) else { return nil }
         return NSRange(location: result.location, length: result.length)
+    }
+}
+
+
+/// Only the captured focused input's own descendants may supply missing text geometry.
+/// No application/window ancestry or mouse position is used as an anchor.
+private enum FocusedTextGeometry {
+    private final class Budget {
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.040
+        var exhausted = false
+
+        func prepare(_ element: AXUIElement) -> Bool {
+            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            guard remaining > 0 else { exhausted = true; return false }
+            AXUIElementSetMessagingTimeout(element, Float(remaining))
+            return true
+        }
+
+        func attribute(_ element: AXUIElement, _ key: CFString) -> (AXError, CFTypeRef?) {
+            guard prepare(element) else { return (.cannotComplete, nil) }
+            var value: CFTypeRef?
+            let error = AXUIElementCopyAttributeValue(element, key, &value)
+            if ProcessInfo.processInfo.systemUptime >= deadline { exhausted = true }
+            return (error, value)
+        }
+    }
+
+    static func bounds(_ focused: AXUIElement, text: String, editedRange: NSRange, leading: NSRange) -> CGRect? {
+        let budget = Budget()
+        defer { AXUIElementSetMessagingTimeout(focused, 0.05) }
+        // The focused input's leading range was already queried by textBounds.
+        guard let inputFrame = frame(focused, budget: budget), !inputFrame.isEmpty else { return nil }
+        var stack: [(AXUIElement, Int)] = [(focused, 0)]
+        var visited: [AXUIElement] = []
+        var candidate: (AXUIElement, String, NSRange, String)?
+        while let (element, depth) = stack.popLast() {
+            guard !budget.exhausted, visited.count < 24,
+                  !visited.contains(where: { CFEqual($0, element) }) else { return nil }
+            visited.append(element)
+            let (childrenError, rawChildren) = budget.attribute(element, kAXChildrenAttribute as CFString)
+            let children: [AXUIElement]
+            if childrenError == .success {
+                guard let rawChildren, CFGetTypeID(rawChildren) == CFArrayGetTypeID(),
+                      let array = rawChildren as? [AnyObject], array.count <= 24,
+                      array.allSatisfy({ CFGetTypeID($0) == AXUIElementGetTypeID() }) else { return nil }
+                children = array.map { unsafeBitCast($0, to: AXUIElement.self) }
+            } else if childrenError == .attributeUnsupported || childrenError == .noValue { children = [] }
+            else { return nil }
+            if !children.isEmpty {
+                guard depth < 5, visited.count + stack.count + children.count <= 24 else { return nil }
+                stack.append(contentsOf: children.map { ($0, depth + 1) })
+                continue
+            }
+            guard depth > 0 else { continue }
+            let (roleError, rawRole) = budget.attribute(element, kAXRoleAttribute as CFString)
+            guard roleError == .success, let role = rawRole as? String else { return nil }
+            guard [kAXStaticTextRole as String, kAXTextFieldRole as String, kAXTextAreaRole as String].contains(role) else { continue }
+            let (valueError, rawText) = budget.attribute(element, kAXValueAttribute as CFString)
+            guard valueError == .success, let leaf = rawText as? String else { return nil }
+            guard let mapped = TextGeometry.mappedLeaf(leaf, in: text, covering: editedRange) else { continue }
+            guard candidate == nil else { return nil }
+            candidate = (element, leaf, mapped, role)
+        }
+        guard !budget.exhausted, let (element, leaf, mapped, role) = candidate else { return nil }
+        defer { AXUIElementSetMessagingTimeout(element, 0.05) }
+        let local = NSRange(location: leading.location - mapped.location, length: leading.length)
+        if let result = rangeBounds(element, range: local, budget: budget),
+           TextGeometry.usable(result, characterCount: 1, fieldFrame: inputFrame), !budget.exhausted {
+            return result
+        }
+        // Static text frames start at their first glyph, even with a trailing
+        // delimiter or further words. An interior word still needs range geometry.
+        guard role == kAXStaticTextRole as String,
+              let result = frame(element, budget: budget), !budget.exhausted else { return nil }
+        return TextGeometry.leafFrameAnchor(result, leaf: leaf, mapped: mapped,
+                                            leading: leading, fieldFrame: inputFrame)
+    }
+
+    private static func rangeBounds(_ element: AXUIElement, range: NSRange, budget: Budget) -> CGRect? {
+        guard budget.prepare(element) else { return nil }
+        var range = CFRange(location: range.location, length: range.length)
+        guard let parameter = AXValueCreate(.cfRange, &range) else { return nil }
+        var raw: CFTypeRef?
+        guard AXUIElementCopyParameterizedAttributeValue(element, kAXBoundsForRangeParameterizedAttribute as CFString,
+                                                         parameter, &raw) == .success,
+              let raw, CFGetTypeID(raw) == AXValueGetTypeID() else { return nil }
+        if ProcessInfo.processInfo.systemUptime >= budget.deadline { budget.exhausted = true; return nil }
+        var rect = CGRect.zero
+        guard AXValueGetValue(unsafeBitCast(raw, to: AXValue.self), .cgRect, &rect) else { return nil }
+        return rect
+    }
+
+    private static func frame(_ element: AXUIElement, budget: Budget) -> CGRect? {
+        let (positionError, position) = budget.attribute(element, kAXPositionAttribute as CFString)
+        let (sizeError, size) = budget.attribute(element, kAXSizeAttribute as CFString)
+        guard positionError == .success, sizeError == .success,
+              let position, CFGetTypeID(position) == AXValueGetTypeID(),
+              let size, CFGetTypeID(size) == AXValueGetTypeID() else { return nil }
+        var point = CGPoint.zero
+        var dimensions = CGSize.zero
+        guard AXValueGetValue(unsafeBitCast(position, to: AXValue.self), .cgPoint, &point),
+              AXValueGetValue(unsafeBitCast(size, to: AXValue.self), .cgSize, &dimensions) else { return nil }
+        return CGRect(origin: point, size: dimensions)
     }
 }

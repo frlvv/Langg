@@ -8,6 +8,28 @@ enum TextGeometry {
         return NSRange(index..<text.index(after: index), in: text)
     }
 
+    /// A leaf must occur exactly once, byte-for-byte in UTF-16, in the focused input.
+    /// Repeated snippets cannot establish which rendered occurrence was edited.
+    static func mappedLeaf(_ leaf: String, in text: String, covering range: NSRange) -> NSRange? {
+        guard !leaf.isEmpty, Range(range, in: text) != nil else { return nil }
+        let input = text as NSString
+        let match = input.range(of: leaf, options: .literal)
+        guard match.location != NSNotFound, Range(match, in: text) != nil,
+              range.location >= match.location,
+              NSMaxRange(range) <= NSMaxRange(match) else { return nil }
+        let remaining = NSRange(location: match.location + 1, length: input.length - match.location - 1)
+        guard input.range(of: leaf, options: .literal, range: remaining).location == NSNotFound else { return nil }
+        return match
+    }
+
+    /// A single-line leaf frame supplies its first glyph's origin, never an interior word.
+    static func leafFrameAnchor(_ rect: CGRect, leaf: String, mapped: NSRange,
+                                leading: NSRange, fieldFrame: CGRect) -> CGRect? {
+        guard leading.location == mapped.location, !leaf.contains(where: { $0.isNewline }),
+              usable(rect, characterCount: leaf.count, fieldFrame: fieldFrame) else { return nil }
+        return CGRect(x: rect.minX, y: rect.minY, width: 0, height: rect.height)
+    }
+
     static func usable(_ rect: CGRect, characterCount: Int, fieldFrame: CGRect?) -> Bool {
         rejection(rect, characterCount: characterCount, fieldFrame: fieldFrame) == nil
     }

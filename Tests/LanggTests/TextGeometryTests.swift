@@ -40,3 +40,36 @@ import Testing
     #expect(frame.maxY == word.minY - 4)
     #expect(!frame.intersects(word))
 }
+
+
+@Test func descendantGeometryMapsExactUTF16Offsets() {
+    let text = "🙂first\nновое слово"
+    let edited = NSRange(location: 8, length: 5)
+    #expect(TextGeometry.mappedLeaf("новое слово", in: text, covering: edited) == NSRange(location: 8, length: 11))
+    #expect(TextGeometry.mappedLeaf("новое", in: text, covering: edited) == edited)
+    #expect(TextGeometry.mappedLeaf("first", in: text, covering: edited) == nil)
+}
+
+@Test func descendantGeometryRejectsAmbiguousAndNonliteralText() {
+    #expect(TextGeometry.mappedLeaf("word", in: "word word", covering: NSRange(location: 5, length: 4)) == nil)
+    #expect(TextGeometry.mappedLeaf("aaa", in: "aaaa", covering: NSRange(location: 0, length: 3)) == nil)
+    #expect(TextGeometry.mappedLeaf("é", in: "e\u{301}", covering: NSRange(location: 0, length: 2)) == nil)
+    #expect(TextGeometry.mappedLeaf("", in: "word", covering: NSRange(location: 0, length: 4)) == nil)
+    #expect(TextGeometry.mappedLeaf("word", in: "word", covering: NSRange(location: 0, length: 5)) == nil)
+}
+
+
+@Test func descendantLeafFrameAnchorsOnlyItsLeadingWord() throws {
+    let input = CGRect(x: 100, y: 100, width: 600, height: 200)
+    let leafFrame = CGRect(x: 120, y: 120, width: 150, height: 18)
+    let leaf = "hello world "
+    let mapped = try #require(TextGeometry.mappedLeaf(leaf, in: leaf, covering: NSRange(location: 0, length: 5)))
+    #expect(TextGeometry.leafFrameAnchor(leafFrame, leaf: leaf, mapped: mapped,
+        leading: NSRange(location: 0, length: 1), fieldFrame: input) == CGRect(x: 120, y: 120, width: 0, height: 18))
+    #expect(TextGeometry.leafFrameAnchor(leafFrame, leaf: leaf, mapped: mapped,
+        leading: NSRange(location: 6, length: 1), fieldFrame: input) == nil)
+    #expect(TextGeometry.leafFrameAnchor(input, leaf: leaf, mapped: mapped,
+        leading: NSRange(location: 0, length: 1), fieldFrame: input) == nil)
+    #expect(TextGeometry.leafFrameAnchor(leafFrame, leaf: "hello\nworld", mapped: mapped,
+        leading: NSRange(location: 0, length: 1), fieldFrame: input) == nil)
+}
