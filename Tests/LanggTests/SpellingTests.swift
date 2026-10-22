@@ -13,7 +13,7 @@ func actualSystemDictionaryCorrectsLayout(text: String, expected: String) async 
     var accepted: String?
     var decisions: [String] = []
     for candidate in AutomaticCorrection.candidates(in: text, caretUTF16: text.utf16.count) {
-        let source = candidate.sourceNeedsDictionaryCheck ? await spelling.isKnown(candidate.original, language: candidate.direction.sourceLanguage) : false
+        let source = candidate.sourceNeedsDictionaryCheck ? await spelling.isKnown(candidate.original, language: candidate.direction.sourceLanguage, acceptCaseVariants: false) : false
         let target = await spelling.isKnown(candidate.replacement, language: candidate.direction.targetLanguage)
         decisions.append("\(candidate.original): source=\(String(describing: source)), target=\(String(describing: target))")
         if AutomaticCorrection.shouldCorrect(candidate, sourceKnown: source, targetKnown: target) { accepted = candidate.replacement; break }
@@ -26,7 +26,7 @@ func actualSystemDictionaryKeepsCorrectWords(_ word: String) async {
     let spelling = SpellingService()
     let text = word + " "
     for candidate in AutomaticCorrection.candidates(in: text, caretUTF16: text.utf16.count) {
-        let source = candidate.sourceNeedsDictionaryCheck ? await spelling.isKnown(candidate.original, language: candidate.direction.sourceLanguage) : false
+        let source = candidate.sourceNeedsDictionaryCheck ? await spelling.isKnown(candidate.original, language: candidate.direction.sourceLanguage, acceptCaseVariants: false) : false
         let target = await spelling.isKnown(candidate.replacement, language: candidate.direction.targetLanguage)
         #expect(!AutomaticCorrection.shouldCorrect(candidate, sourceKnown: source, targetKnown: target))
     }
@@ -44,7 +44,7 @@ func actualSystemDictionaryKeepsCorrectWords(_ word: String) async {
     let candidates = AutomaticCorrection.contextualCandidates(in: text, caretUTF16: text.utf16.count)
     var accepted: [String: String] = [:]
     for candidate in candidates {
-        let source = await spelling.isKnown(candidate.original, language: candidate.direction.sourceLanguage)
+        let source = await spelling.isKnown(candidate.original, language: candidate.direction.sourceLanguage, acceptCaseVariants: false)
         let target = await spelling.isKnown(candidate.replacement, language: candidate.direction.targetLanguage)
         let targetScript: LayoutDirection = candidate.direction == .englishToRussian ? .russianToEnglish : .englishToRussian
         var context = false
