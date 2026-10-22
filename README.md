@@ -54,4 +54,10 @@ Langg проверяет завершённое слово и предлагае
 
 ## Разработка
 
-Исходный код доступен по лицензии MIT. Инструкции сборки и выпуска находятся в [BUILDING.md](BUILDING.md). Обновления устанавливаются через [Sparkle](https://sparkle-project.org/), лицензии компонентов приложены в [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Исходный код доступен по лицензии MIT. Для компиляции нужны macOS, Xcode и Swift 6. Из корня проекта выполните:
+
+```sh
+swift build
+```
+
+Команда компилирует исполняемый файл; для запуска в виде приложения macOS нужен пакет `.app` с содержимым `Resources` и фреймворком Sparkle. Обновления устанавливаются через [Sparkle](https://sparkle-project.org/), лицензии компонентов приложены в [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

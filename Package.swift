@@ -17,8 +17,6 @@ let package = Package(
             .linkedFramework("Carbon"), .linkedFramework("ServiceManagement"),
             .linkedFramework("IOKit"),
             .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])
-        ]),
-        .testTarget(name: "LanggCoreTests", dependencies: ["LanggCore"]),
-        .testTarget(name: "LanggTests", dependencies: ["Langg"])
+        ])
     ]
 )

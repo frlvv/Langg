@@ -13,3 +13,9 @@ dist/
 *.keychain-db
 .env
 .env.*
+
+# Private development files are maintained outside this repository.
+Tests/
+scripts/
+.github/
+BUILDING.md
