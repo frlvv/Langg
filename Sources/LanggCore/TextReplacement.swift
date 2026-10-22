@@ -50,11 +50,13 @@ public struct TextReplacement: Sendable {
     associatedtype Field: Equatable
     func read() -> (field: Field, state: TextState)?
     func select(_ range: NSRange, in field: Field) -> Bool
+    func supportsDirectReplacement(in field: Field) -> Bool
     func replaceSelection(with text: String, in field: Field) -> Bool
     func insertText(_ text: String, in field: Field, expected: TextState) async -> Bool
 }
 
 public extension TextEditor {
+    func supportsDirectReplacement(in field: Field) -> Bool { true }
     func insertText(_ text: String, in field: Field, expected: TextState) async -> Bool { false }
 }
 
@@ -78,13 +80,15 @@ public extension TextEditor {
                                                           selected: TextState, editor: Editor) async -> TextState? {
         guard await waitForState(selected, allowing: edit.before, field: field, editor: editor),
               !Task.isCancelled else { return nil }
-        _ = editor.replaceSelection(with: edit.replacement, in: field)
+        if editor.supportsDirectReplacement(in: field) {
+            _ = editor.replaceSelection(with: edit.replacement, in: field)
         // Neither success nor failure from AX proves whether text was written.
         // Both can precede a delayed commit, so use the same readback budget
         // before considering a second insertion method.
-        if await waitForText(edit.after.text, allowing: selected, field: field, editor: editor,
+            if await waitForText(edit.after.text, allowing: selected, field: field, editor: editor,
                              attempts: 12) {
-            return await finishAfterAttempt(edit, field: field, editor: editor)
+                return await finishAfterAttempt(edit, field: field, editor: editor)
+            }
         }
         guard !Task.isCancelled,
               !edit.replacement.unicodeScalars.contains(where: {

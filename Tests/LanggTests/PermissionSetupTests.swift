@@ -56,6 +56,7 @@ import Testing
 
 @Test func monitoringRestartFallbackRequiresReturningFromSystemSettings() {
     var setup = PermissionSetup()
+    setup.didRequest(.accessibility)
     setup.didRequest(.inputMonitoring)
     #expect(!setup.shouldOfferRestart(keyboardVerified: false))
     setup.didActivateApplication(isSystemSettings: true)
@@ -75,10 +76,41 @@ import Testing
 
 @Test func anotherMonitoringRequestWaitsForItsOwnSettingsVisit() {
     var setup = PermissionSetup()
+    setup.didRequest(.accessibility)
     setup.didRequest(.inputMonitoring)
     setup.didActivateApplication(isSystemSettings: true)
     setup.didActivateApplication(isSystemSettings: false)
     setup.didRequest(.inputMonitoring)
     setup.didActivateApplication(isSystemSettings: false)
     #expect(!setup.shouldOfferRestart(keyboardVerified: false))
+}
+
+@Test func freshPermissionGrantCompletesOnlyItsOwnStep() {
+    let setup = PermissionSetup()
+    #expect(setup.status(for: .accessibility, reportedGranted: false, keyboardVerified: false,
+                         freshlyGranted: true) == .verified)
+    #expect(setup.status(for: .inputMonitoring, reportedGranted: false, keyboardVerified: false,
+                         freshlyGranted: false) == .needsPermission)
+}
+
+@Test func freshDenialOverridesCachedGrant() {
+    var setup = PermissionSetup()
+    #expect(setup.status(for: .accessibility, reportedGranted: true, keyboardVerified: false,
+                         freshlyGranted: false) == .needsPermission)
+    setup.didRequest(.accessibility)
+    #expect(setup.status(for: .accessibility, reportedGranted: true, keyboardVerified: false,
+                         freshlyGranted: false) == .awaitingVerification)
+}
+
+@Test func monitoringAloneDoesNotOfferRestartFallback() {
+    var setup = PermissionSetup()
+    setup.didRequest(.inputMonitoring)
+    setup.didActivateApplication(isSystemSettings: true)
+    setup.didActivateApplication(isSystemSettings: false)
+    #expect(!setup.shouldOfferRestart(keyboardVerified: false))
+    setup.didRequest(.accessibility)
+    #expect(!setup.shouldOfferRestart(keyboardVerified: false))
+    setup.didActivateApplication(isSystemSettings: true)
+    setup.didActivateApplication(isSystemSettings: false)
+    #expect(setup.shouldOfferRestart(keyboardVerified: false))
 }

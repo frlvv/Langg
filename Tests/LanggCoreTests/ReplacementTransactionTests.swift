@@ -11,6 +11,7 @@ import Testing
     var replaceFails = false
     var replacementIsNoOp = false
     var keyboardEnabled = false
+    var directReplacementSupported = true
     var keyboardWrites = 0
     var beforeKeyboard: ((FakeEditor) -> Void)?
     var onRead: ((FakeEditor) -> Void)?
@@ -20,6 +21,7 @@ import Testing
     var keyboardReportsFailureAfterWrite = false
 
     init(_ state: TextState) { self.state = state }
+    func supportsDirectReplacement(in field: Int) -> Bool { directReplacementSupported }
     func read() -> (field: Int, state: TextState)? {
         readCount += 1
         onRead?(self)
@@ -51,6 +53,17 @@ import Testing
         afterKeyboard?(self)
         return !keyboardReportsFailureAfterWrite
     }
+}
+
+@MainActor @Test func unsupportedNativeSetterIsSkippedBeforeVerifiedPaste() async throws {
+    let state = try #require(TextState(text: "ghbdtn ", selection: NSRange(location: 7, length: 0)))
+    let edit = try #require(TextReplacement(before: state, range: NSRange(location: 0, length: 6), replacement: "привет"))
+    let editor = FakeEditor(state)
+    editor.directReplacementSupported = false
+    editor.keyboardEnabled = true
+    #expect(await TextReplacementTransaction.applyWithFallback(edit, to: 1, using: editor) == edit.after)
+    #expect(editor.writes == 0)
+    #expect(editor.keyboardWrites == 1)
 }
 
 @MainActor @Test func transactionRestoresCaretAfterDelimiter() throws {

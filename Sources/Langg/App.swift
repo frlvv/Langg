@@ -1,7 +1,17 @@
 import SwiftUI
 import AppKit
 
-@main struct LanggApp: App {
+@main enum LanggEntry {
+    @MainActor static func main() {
+        if CommandLine.arguments.contains(PermissionStatusProbe.argument) {
+            PermissionStatusProbe.writeCurrentStatus()
+            return
+        }
+        LanggApp.main()
+    }
+}
+
+struct LanggApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     var body: some Scene {

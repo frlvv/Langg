@@ -20,6 +20,7 @@ import Testing
     #expect(!TextGeometry.usable(.zero, characterCount: 1, fieldFrame: input))
     #expect(!TextGeometry.usable(CGRect(x: 0, y: 0, width: 8, height: 18), characterCount: 1, fieldFrame: input))
     #expect(TextGeometry.usable(CGRect(x: 325, y: 430, width: 8, height: 18), characterCount: 1, fieldFrame: input))
+    #expect(TextGeometry.usable(CGRect(x: 325, y: 430, width: 0, height: 18), characterCount: 1, fieldFrame: input))
 }
 
 @MainActor @Test func toastAppearsAboveEditedWordInsteadOfAFullPanelWidthToTheLeft() throws {

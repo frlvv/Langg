@@ -9,14 +9,21 @@ enum TextGeometry {
     }
 
     static func usable(_ rect: CGRect, characterCount: Int, fieldFrame: CGRect?) -> Bool {
+        rejection(rect, characterCount: characterCount, fieldFrame: fieldFrame) == nil
+    }
+
+    static func rejection(_ rect: CGRect, characterCount: Int, fieldFrame: CGRect?) -> String? {
         guard rect.origin.x.isFinite, rect.origin.y.isFinite,
-              rect.width.isFinite, rect.height.isFinite,
-              rect.width > 0, rect.height > 0, rect.height <= 120,
-              rect.width <= rect.height * CGFloat(max(characterCount, 1)) * 4 else { return false }
+              rect.width.isFinite, rect.height.isFinite else { return "nonfinite" }
+        // A zero-width insertion rectangle still gives an exact text anchor.
+        guard rect.width >= 0, rect.height > 0 else { return "emptyHeight" }
+        guard rect.height <= 120 else { return "tooTall" }
+        guard rect.width <= rect.height * CGFloat(max(characterCount, 1)) * 4 else { return "tooWide" }
         if let fieldFrame, !fieldFrame.isEmpty {
             // Some editors return their entire input frame for every range.
-            guard fieldFrame.intersects(rect), rect != fieldFrame else { return false }
+            guard fieldFrame.intersects(rect) || fieldFrame.contains(rect.origin) else { return "outsideField" }
+            guard rect != fieldFrame else { return "wholeField" }
         }
-        return true
+        return nil
     }
 }

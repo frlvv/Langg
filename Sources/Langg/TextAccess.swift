@@ -44,11 +44,11 @@ struct TextSnapshot {
         guard let application = NSWorkspace.shared.frontmostApplication,
               application.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return nil }
         let app = applicationElement(application)
+        enableTextAccessibility(for: application, element: app)
         var raw: CFTypeRef?
         var error = AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &raw)
         if error != .success || raw == nil {
             InputDiagnostics.record("applicationFocusError.\(error.rawValue)")
-            enableTextAccessibility(for: application, element: app)
             error = AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &raw)
         }
         if error != .success || raw == nil {
@@ -134,6 +134,12 @@ struct TextSnapshot {
         let edit: TextReplacement
         let selectedBounds: ((CGRect) -> Void)?
 
+        func supportsDirectReplacement(in field: TextFieldIdentity) -> Bool {
+            var settable = DarwinBoolean(false)
+            let result = AXUIElementIsAttributeSettable(field.element, kAXSelectedTextAttribute as CFString, &settable)
+            return result == .attributeUnsupported ? false : result != .success || settable.boolValue
+        }
+
         func read() -> (field: TextFieldIdentity, state: TextState)? {
             guard let snapshot = capture() else { return nil }
             return (snapshot.field, snapshot.state)
@@ -148,12 +154,16 @@ struct TextSnapshot {
         func replaceSelection(with text: String, in field: TextFieldIdentity) -> Bool {
             // Selection has been verified by the transaction. Web editors can
             // expose text-marker geometry even without integer-range bounds.
+            captureSelectionBounds(in: field)
+            return AXUIElementSetAttributeValue(field.element, kAXSelectedTextAttribute as CFString, text as CFString) == .success
+        }
+
+        private func captureSelectionBounds(in field: TextFieldIdentity) {
             if selectedBounds != nil,
                let bounds = textBounds(field.element, text: edit.before.text, range: edit.range)
                     ?? selectedMarkerBounds(field.element, characterCount: edit.original.count) {
                 selectedBounds?(bounds)
             }
-            return AXUIElementSetAttributeValue(field.element, kAXSelectedTextAttribute as CFString, text as CFString) == .success
         }
 
         func insertText(_ text: String, in field: TextFieldIdentity, expected: TextState) async -> Bool {
@@ -163,6 +173,7 @@ struct TextSnapshot {
             guard let down = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: true),
                   let up = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: false),
                   let selectedRange = Range(expected.selection, in: expected.text) else { return false }
+            captureSelectionBounds(in: field)
             for event in [down, up] {
                 event.flags = .maskCommand
                 event.setIntegerValueField(.eventSourceUserData, value: replacementMarker)
@@ -198,17 +209,21 @@ struct TextSnapshot {
         var range = CFRange(location: leading.location, length: leading.length)
         guard let param = AXValueCreate(.cfRange, &range) else { return nil }
         var raw: CFTypeRef?
-        guard AXUIElementCopyParameterizedAttributeValue(element,
-            kAXBoundsForRangeParameterizedAttribute as CFString, param, &raw) == .success,
-              let rect = rectValue(raw),
-              TextGeometry.usable(rect, characterCount: 1, fieldFrame: frame(element)) else { return nil }
+        let result = AXUIElementCopyParameterizedAttributeValue(element,
+            kAXBoundsForRangeParameterizedAttribute as CFString, param, &raw)
+        guard result == .success else { InputDiagnostics.record("boundsError.\(result.rawValue)"); return nil }
+        guard let rect = rectValue(raw) else { InputDiagnostics.record("boundsNotRectangle"); return nil }
+        if let reason = TextGeometry.rejection(rect, characterCount: 1, fieldFrame: frame(element)) {
+            InputDiagnostics.record("boundsRejected.\(reason)")
+            return nil
+        }
         return rect
     }
 
     private static func selectedMarkerBounds(_ element: AXUIElement, characterCount: Int) -> CGRect? {
         var marker: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, "AXSelectedTextMarkerRange" as CFString, &marker) == .success,
-              let marker else { return nil }
+        let result = AXUIElementCopyAttributeValue(element, "AXSelectedTextMarkerRange" as CFString, &marker)
+        guard result == .success, let marker else { InputDiagnostics.record("markerError.\(result.rawValue)"); return nil }
         var raw: CFTypeRef?
         guard AXUIElementCopyParameterizedAttributeValue(element,
               "AXBoundsForTextMarkerRange" as CFString, marker, &raw) == .success,

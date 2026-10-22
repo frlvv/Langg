@@ -23,7 +23,7 @@ struct PermissionSetup {
     }
 
     mutating func didActivateApplication(isSystemSettings: Bool) {
-        guard requested.contains(.inputMonitoring) else { return }
+        guard requested.contains(.accessibility), requested.contains(.inputMonitoring) else { return }
         if isSystemSettings {
             monitoringSettingsVisited = true
         } else if monitoringSettingsVisited {
@@ -38,14 +38,20 @@ struct PermissionSetup {
         returnedFromMonitoringSettings = false
     }
 
-    func status(for permission: InputPermission, reportedGranted: Bool, keyboardVerified: Bool) -> PermissionSetupStatus {
-        // Requests and cached API answers cannot prove that keyboard input works.
+    func status(for permission: InputPermission, reportedGranted: Bool, keyboardVerified: Bool,
+                freshlyGranted: Bool? = nil) -> PermissionSetupStatus {
+        // A fresh check confirms this permission, while keyboard verification
+        // remains the requirement for the overall working status.
         if keyboardVerified { return .verified }
+        if freshlyGranted == true { return .verified }
+        if freshlyGranted == false {
+            return requested.contains(permission) ? .awaitingVerification : .needsPermission
+        }
         if requested.contains(permission) || reportedGranted { return .awaitingVerification }
         return .needsPermission
     }
 
     func shouldOfferRestart(keyboardVerified: Bool) -> Bool {
-        !keyboardVerified && returnedFromMonitoringSettings
+        !keyboardVerified && requested.contains(.accessibility) && returnedFromMonitoringSettings
     }
 }

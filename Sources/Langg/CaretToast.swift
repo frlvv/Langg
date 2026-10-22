@@ -127,7 +127,6 @@ private final class ToastContentView: NSView {
             glass.style = .clear
             glass.tintColor = nil
             glass.cornerRadius = 0
-            if #available(macOS 27.0, *) { glass.effectIsInteractive = false }
             backdrop = glass
         } else {
             // Older materials add a visible tint; leave only the text instead.

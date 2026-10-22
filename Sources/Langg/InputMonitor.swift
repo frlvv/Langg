@@ -13,6 +13,11 @@ import LanggCore
     @Published private(set) var inputMonitoringGranted = false
     @Published private(set) var inputMonitoringRequired = false
     @Published private(set) var permissionSetup = PermissionSetup()
+    @Published private(set) var freshPermissionSnapshot: PermissionSnapshot?
+    private let permissionProbe = PermissionStatusProbe()
+    private var permissionProbeTask: Task<Void, Never>?
+    private var permissionRevision: UInt64 = 0
+    private var lastPermissionProbe = Date.distantPast
     let settings: AppSettings
     let shortcutRecorder: ShortcutRecorder
     private var consumedKeys = ConsumedKeyPresses()
@@ -94,7 +99,28 @@ import LanggCore
     func permissionStatus(for permission: InputPermission) -> PermissionSetupStatus {
         permissionSetup.status(for: permission,
                                reportedGranted: permission == .accessibility ? accessibilityGranted : inputMonitoringGranted,
-                               keyboardVerified: keyboardAccessVerified)
+                               keyboardVerified: keyboardAccessVerified,
+                               freshlyGranted: freshPermissionSnapshot?.granted(permission))
+    }
+
+    private func refreshPermissionStatus() {
+        guard !keyboardAccessVerified, permissionProbeTask == nil,
+              Date().timeIntervalSince(lastPermissionProbe) >= 1.5,
+              Bundle.main.bundleURL.pathExtension == "app" else { return }
+        lastPermissionProbe = Date()
+        let revision = permissionRevision
+        permissionProbeTask = Task { [weak self] in
+            guard let self else { return }
+            let snapshot = await self.permissionProbe.read()
+            if self.permissionRevision == revision { self.freshPermissionSnapshot = snapshot }
+            self.permissionProbeTask = nil
+        }
+    }
+
+    private func invalidatePermissionSnapshot() {
+        permissionRevision &+= 1
+        freshPermissionSnapshot = nil
+        lastPermissionProbe = .distantPast
     }
 
     private func observeLifecycle() {
@@ -128,6 +154,7 @@ import LanggCore
 
     func requestAccessibilityPermission() {
         isStopped = false
+        invalidatePermissionSnapshot()
         PermissionManagement.registerCurrentApplication()
         permissionSetup.didRequest(.accessibility)
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
@@ -144,6 +171,7 @@ import LanggCore
 
     func requestInputMonitoringPermission() {
         isStopped = false
+        invalidatePermissionSnapshot()
         PermissionManagement.registerCurrentApplication()
         permissionSetup.didRequest(.inputMonitoring)
         _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
@@ -155,6 +183,7 @@ import LanggCore
     func start() {
         InputDiagnostics.flush()
         guard !isStopped else { return }
+        defer { refreshPermissionStatus() }
         if let parent = relaunchParent, !parent.isTerminated {
             updateStatus("Перезапуск Langg…")
             return
@@ -168,9 +197,12 @@ import LanggCore
             IOHIDCheckAccess(kIOHIDRequestTypePostEvent) == kIOHIDAccessTypeGranted
         let canListen = CGPreflightListenEventAccess() ||
             IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
-        if accessibilityGranted != trusted { accessibilityGranted = trusted }
-        if eventTapAccessGranted != canModifyEvents { eventTapAccessGranted = canModifyEvents }
-        if inputMonitoringGranted != canListen { inputMonitoringGranted = canListen }
+        if accessibilityGranted != trusted || eventTapAccessGranted != canModifyEvents || inputMonitoringGranted != canListen {
+            invalidatePermissionSnapshot()
+            accessibilityGranted = trusted
+            eventTapAccessGranted = canModifyEvents
+            inputMonitoringGranted = canListen
+        }
         if inputMonitoringRequired, CGPreflightListenEventAccess() { inputMonitoringRequired = false }
         guard !isSleeping, isSessionActive else {
             stopEventTap()
@@ -268,7 +300,10 @@ import LanggCore
     }
 
     func permissionsWereRevoked() {
-        stop()
+        isStopped = true
+        shortcutRecorder.stop()
+        stopEventTap()
+        invalidatePermissionSnapshot()
         accessibilityGranted = false
         eventTapAccessGranted = false
         inputMonitoringGranted = false
