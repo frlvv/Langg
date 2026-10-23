@@ -49,8 +49,12 @@ public enum AutomaticCorrection {
         guard let range = LayoutConverter.validatedRange(candidate.range, in: text) else { return [] }
         let beforeLine = text[..<range.lowerBound].split(separator: "\n", omittingEmptySubsequences: false).last ?? ""
         let afterLine = text[range.upperBound...].split(separator: "\n", omittingEmptySubsequences: false).first ?? ""
-        let neighbors = Array(beforeLine.split(whereSeparator: \.isWhitespace).suffix(3))
-            + Array(afterLine.split(whereSeparator: \.isWhitespace).prefix(3))
+        let preceding = Array(beforeLine.split(whereSeparator: \.isWhitespace).suffix(4).reversed())
+        let following = Array(afterLine.split(whereSeparator: \.isWhitespace).prefix(4))
+        let neighbors = (0..<max(preceding.count, following.count)).flatMap { distance in
+            [preceding.indices.contains(distance) ? preceding[distance] : nil,
+             following.indices.contains(distance) ? following[distance] : nil].compactMap { $0 }
+        }
         return neighbors.compactMap { token in
             guard token.utf16.count <= 64,
                   LayoutConverter.isSafeAutomaticContext(in: text, range: NSRange(token.startIndex..<token.endIndex, in: text)) else { return nil }
@@ -59,11 +63,47 @@ public enum AutomaticCorrection {
         }
     }
 
-    public static func shouldCorrect(_ candidate: CorrectionCandidate, sourceKnown: Bool?, targetKnown: Bool?, targetContextKnown: Bool = false) -> Bool {
-        // Two-letter tokens are often initials, units or abbreviations. A target
-        // dictionary hit alone is insufficient evidence to rewrite them.
-        guard (candidate.original.count > 2 || (candidate.original.count == 1 && targetContextKnown)), targetKnown == true else { return false }
+    public struct ContextEvidence: Equatable, Sendable {
+        public var sourceWords: Int
+        public var targetWords: Int
+
+        public init(sourceWords: Int = 0, targetWords: Int = 0) {
+            self.sourceWords = sourceWords
+            self.targetWords = targetWords
+        }
+
+        public func supports(_ candidate: CorrectionCandidate) -> Bool {
+            guard targetWords > 0 else { return false }
+            // Short function words can belong to either side of a bilingual
+            // sentence. Overriding a longer known word requires a majority.
+            return candidate.original.count <= 2
+                ? targetWords >= sourceWords : targetWords > sourceWords
+        }
+    }
+
+    public static func requiresContext(_ candidate: CorrectionCandidate, sourceKnown: Bool?) -> Bool {
+        candidate.original.count <= 2 || (candidate.sourceNeedsDictionaryCheck && sourceKnown == true)
+    }
+
+    public static func isEligibleTarget(_ candidate: CorrectionCandidate) -> Bool {
+        guard candidate.direction == .russianToEnglish else { return true }
+        let word = candidate.replacement.lowercased()
+        // Spell checking accepts alphabet names and Roman numerals. They are
+        // not evidence that a short Cyrillic token was typed in the wrong layout.
+        if word.count == 1 { return word == "a" || word == "i" }
+        if word.count == 2 {
+            return word.range(of: "^m{0,4}(cm|cd|d?c{0,3})(xc|xl|l?x{0,3})(ix|iv|v?i{0,3})$",
+                              options: .regularExpression) == nil
+        }
+        return true
+    }
+
+    public static func shouldCorrect(_ candidate: CorrectionCandidate, sourceKnown: Bool?, targetKnown: Bool?, targetContextKnown: Bool = false, contextEvidence: ContextEvidence? = nil) -> Bool {
+        guard targetKnown == true, isEligibleTarget(candidate) else { return false }
         // nil means the service couldn't establish a result, not a misspelling.
-        return !candidate.sourceNeedsDictionaryCheck || sourceKnown == false || (sourceKnown == true && targetContextKnown)
+        guard !candidate.sourceNeedsDictionaryCheck || sourceKnown != nil else { return false }
+        let contextSupportsTarget = contextEvidence?.supports(candidate) ?? targetContextKnown
+        if requiresContext(candidate, sourceKnown: sourceKnown) { return contextSupportsTarget }
+        return !candidate.sourceNeedsDictionaryCheck || sourceKnown == false
     }
 }

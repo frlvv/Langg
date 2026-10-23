@@ -97,6 +97,29 @@ struct TextSnapshot {
         return current.field == snapshot.field && current.state == snapshot.state
     }
 
+    /// Call while input is held, with a snapshot that includes every key the
+    /// monitor has already forwarded. A replay's tap callback precedes its
+    /// consumption by the target, so one matching AX read can still be stale.
+    static func settledSnapshot(matching expected: TextSnapshot,
+                                capture read: @MainActor () -> TextSnapshot? = { capture() }) async -> TextSnapshot? {
+        var consecutiveMatches = 0
+        for attempt in 0..<8 {
+            guard !Task.isCancelled else { return nil }
+            if let current = read() {
+                guard current.field == expected.field else { return nil }
+                consecutiveMatches = current.state == expected.state ? consecutiveMatches + 1 : 0
+                if consecutiveMatches == 2 { return current }
+            } else {
+                consecutiveMatches = 0
+            }
+            if attempt < 7 {
+                do { try await Task.sleep(for: .milliseconds(4)) }
+                catch { return nil }
+            }
+        }
+        return nil
+    }
+
     static func replace(_ snapshot: TextSnapshot, edit: TextReplacement,
                         selectedBounds: ((CGRect) -> Void)? = nil) async -> TextSnapshot? {
         guard snapshot.state == edit.before, isEditable(snapshot.element),
@@ -137,7 +160,7 @@ struct TextSnapshot {
         func supportsDirectReplacement(in field: TextFieldIdentity) -> Bool {
             var settable = DarwinBoolean(false)
             let result = AXUIElementIsAttributeSettable(field.element, kAXSelectedTextAttribute as CFString, &settable)
-            return result == .attributeUnsupported ? false : result != .success || settable.boolValue
+            return result == .success && settable.boolValue
         }
 
         func read() -> (field: TextFieldIdentity, state: TextState)? {
@@ -155,6 +178,12 @@ struct TextSnapshot {
             // Selection has been verified by the transaction. Web editors can
             // expose text-marker geometry even without integer-range bounds.
             captureSelectionBounds(in: field)
+            // Geometry is a separate AX round trip. Input already queued by
+            // the target can commit while that query runs, so the transaction's
+            // earlier selection read cannot authorize this later write.
+            guard !Task.isCancelled, let ready = read(), ready.field == field,
+                  ready.state.text == edit.before.text,
+                  ready.state.selection == edit.range else { return false }
             return AXUIElementSetAttributeValue(field.element, kAXSelectedTextAttribute as CFString, text as CFString) == .success
         }
 

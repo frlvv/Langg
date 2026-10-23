@@ -81,6 +81,10 @@ public extension TextEditor {
         guard await waitForState(selected, allowing: edit.before, field: field, editor: editor),
               !Task.isCancelled else { return nil }
         if editor.supportsDirectReplacement(in: field) {
+            // Capability queries can also make external AX round trips. A
+            // selection confirmed before that call may no longer be current.
+            guard !Task.isCancelled, let ready = editor.read(),
+                  ready.field == field, ready.state == selected else { return nil }
             _ = editor.replaceSelection(with: edit.replacement, in: field)
         // Neither success nor failure from AX proves whether text was written.
         // Both can precede a delayed commit, so use the same readback budget

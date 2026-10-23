@@ -29,6 +29,8 @@ import LanggCore
     private var runSource: CFRunLoopSource?
     private var undo: UndoRecord?
     private var suppressed: SuppressedCorrection?
+    private var correctionHistory = CorrectionHistory()
+    private var historyField: TextFieldIdentity?
     private var queue = CorrectionQueue()
     private var pendingFields: [UInt64: TextFieldIdentity] = [:]
     private var pendingProcesses: [UInt64: pid_t] = [:]
@@ -528,29 +530,30 @@ import LanggCore
         guard let initial, let boundary, let initialRequest = queue.request(id) else { return }
         if ambiguous, initialRequest.followingText.first.map(LayoutConverter.isLayoutLetter) == true { return }
         var reference = initial
+        reconcileHistory(with: initial)
         var referenceFollowing = initialRequest.followingText
         let currentWordStart = LayoutConverter.wordCandidates(in: initial.text, caretUTF16: boundary, completed: true).first?.location
         var switchDirection: LayoutDirection?
         let candidates = AutomaticCorrection.contextualCandidates(in: initial.text, caretUTF16: boundary, excludedWords: settings.excludedWords)
         var correctedRanges: Set<NSRange> = []
         for candidate in candidates {
-            guard candidate.original.count != 2 else { continue }
+            guard AutomaticCorrection.isEligibleTarget(candidate) else { continue }
+            if correctionHistory.contains(candidate.range) { continue }
             if correctedRanges.contains(where: { NSIntersectionRange($0, candidate.range).length > 0 }) { continue }
             if let suppressed, suppressed.field == initial.field, suppressed.range == candidate.range,
                suppressed.word == candidate.original { continue }
+            let targetKnown = await spelling.isKnown(candidate.replacement, language: candidate.direction.targetLanguage)
+            guard targetKnown == true else { continue }
             let sourceKnown = candidate.sourceNeedsDictionaryCheck
                 ? await spelling.isKnown(candidate.original, language: candidate.direction.sourceLanguage, acceptCaseVariants: false) : false
             if candidate.sourceNeedsDictionaryCheck && sourceKnown == nil { continue }
-            let needsContext = sourceKnown == true || candidate.original.count == 1
-            let targetContextKnown = needsContext
-                ? await hasTargetLanguageContext(candidate, in: TextAccess.capture()?.text ?? reference.text) : false
-            if needsContext && !targetContextKnown { continue }
-            let targetKnown = await spelling.isKnown(candidate.replacement, language: candidate.direction.targetLanguage)
+            let evidence = AutomaticCorrection.requiresContext(candidate, sourceKnown: sourceKnown)
+                ? await languageContext(for: candidate, in: reference.text) : nil
             guard !Task.isCancelled, generation == epoch, settings.automatic,
                   !settings.excludedApps.contains(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""),
                   !settings.excludedWords.contains(where: { $0.caseInsensitiveCompare(candidate.original) == .orderedSame }),
                   InputSources.currentIdentifier() == source,
-                  AutomaticCorrection.shouldCorrect(candidate, sourceKnown: sourceKnown, targetKnown: targetKnown, targetContextKnown: targetContextKnown),
+                  AutomaticCorrection.shouldCorrect(candidate, sourceKnown: sourceKnown, targetKnown: targetKnown, contextEvidence: evidence),
                   let request = queue.request(id), request.followingText.hasPrefix(referenceFollowing),
                   let latest = TextAccess.capture(), latest.field == initial.field else { continue }
             let appended = String(request.followingText.dropFirst(referenceFollowing.count))
@@ -560,13 +563,14 @@ import LanggCore
             // Finish this batch before changing the layout; later dictionary
             // decisions still belong to the source captured for this request.
             guard let after = await apply(latest, range: candidate.range, replacement: candidate.replacement,
-                                          direction: candidate.direction, switchLayout: false) else { return }
+                                          direction: candidate.direction, switchLayout: false,
+                                          pendingRequest: (id, request.followingText)) else { return }
             correctedRanges.insert(candidate.range)
             reference = after
-            referenceFollowing = request.followingText
+            referenceFollowing = queue.request(id)?.followingText ?? request.followingText
             if candidate.range.location == currentWordStart { switchDirection = candidate.direction }
         }
-        if let switchDirection, generation == epoch, InputSources.currentIdentifier() == source,
+        if let switchDirection, inputReplay.canBegin, generation == epoch, InputSources.currentIdentifier() == source,
            let request = queue.request(id), request.followingText.allSatisfy({
                $0.isWhitespace || ($0.isPunctuation && !LayoutConverter.isPhysicalLetterKey($0))
            }), TextAccess.isCurrent(reference) {
@@ -574,13 +578,19 @@ import LanggCore
         }
     }
 
-    private func hasTargetLanguageContext(_ candidate: CorrectionCandidate, in text: String) async -> Bool {
+    private func languageContext(for candidate: CorrectionCandidate, in text: String) async -> AutomaticCorrection.ContextEvidence {
         let targetDirection: LayoutDirection = candidate.direction == .englishToRussian ? .russianToEnglish : .englishToRussian
+        var evidence = AutomaticCorrection.ContextEvidence()
         for word in AutomaticCorrection.contextWords(for: candidate, in: text) {
             if LayoutConverter.isAlphabeticWord(word, direction: targetDirection),
-               await spelling.isKnown(word, language: candidate.direction.targetLanguage) == true { return true }
+               await spelling.isKnown(word, language: candidate.direction.targetLanguage) == true {
+                evidence.targetWords += 1
+            } else if LayoutConverter.isAlphabeticWord(word, direction: candidate.direction),
+                      await spelling.isKnown(word, language: candidate.direction.sourceLanguage, acceptCaseVariants: false) == true {
+                evidence.sourceWords += 1
+            }
         }
-        return false
+        return evidence
     }
 
     private func correctText() async {
@@ -653,18 +663,32 @@ import LanggCore
     }
 
     @discardableResult private func apply(_ snapshot: TextSnapshot, range: NSRange, replacement: String,
-                       direction: LayoutDirection, switchLayout: Bool) async -> TextSnapshot? {
+                       direction: LayoutDirection, switchLayout: Bool,
+                       pendingRequest: (id: UInt64, followingText: String)? = nil) async -> TextSnapshot? {
         InputDiagnostics.record("replacementAttempt")
         let previousSource = InputSources.currentIdentifier()
-        guard let edit = TextReplacement(before: snapshot.state, range: range, replacement: replacement),
-              await beginReplacement() else { return nil }
+        guard await beginReplacement() else { return nil }
         defer { inputReplay.end() }
+        // A replayed key reaches the tap before the editor consumes it. Account
+        // for every forwarded key before selecting text for the next edit.
+        var expected = snapshot.state
+        if let pendingRequest {
+            guard let request = queue.request(pendingRequest.id),
+                  request.followingText.hasPrefix(pendingRequest.followingText),
+                  let appended = expected.appendingAtCaret(String(request.followingText.dropFirst(pendingRequest.followingText.count))) else { return nil }
+            expected = appended
+        }
+        guard let settled = await TextAccess.settledSnapshot(matching: TextSnapshot(field: snapshot.field, state: expected)),
+              !Task.isCancelled,
+              let edit = TextReplacement(before: settled.state, range: range, replacement: replacement) else { return nil }
         var editedBounds: CGRect?
         let captureBounds: ((CGRect) -> Void)? = settings.notifications ? { editedBounds = $0 } : nil
-        guard let after = await TextAccess.replace(snapshot, edit: edit, selectedBounds: captureBounds) else {
+        guard let after = await TextAccess.replace(settled, edit: edit, selectedBounds: captureBounds) else {
             correctionFeedback = "Поле не подтвердило замену. Проверьте текст перед повторным исправлением."
             return nil
         }
+        reconcileHistory(with: settled)
+        correctionHistory.remember(edit)
         undo = UndoRecord(edit: edit, after: after, previousInputSourceID: previousSource, wordRange: range)
         if switchLayout { _ = InputSources.select(direction.targetLanguage) }
         correctionFeedback = "Текст исправлен."
@@ -703,6 +727,14 @@ import LanggCore
             do { try await Task.sleep(for: .milliseconds(1)) } catch { return false }
         }
         return false
+    }
+
+    private func reconcileHistory(with snapshot: TextSnapshot) {
+        if historyField != snapshot.field {
+            correctionHistory = CorrectionHistory()
+            historyField = snapshot.field
+        }
+        correctionHistory.reconcile(with: snapshot.text)
     }
 }
 
