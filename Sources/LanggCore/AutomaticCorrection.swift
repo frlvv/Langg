@@ -1,5 +1,17 @@
 import Foundation
 
+public struct WordEvidence: Equatable, Sendable {
+    public let dictionaryKnown: Bool?
+    // nil means lexical evidence is unavailable or was not requested. A spell
+    // checker accepting a letter name or abbreviation is weaker than a word.
+    public let ordinaryShortWord: Bool?
+
+    public init(dictionaryKnown: Bool?, ordinaryShortWord: Bool? = nil) {
+        self.dictionaryKnown = dictionaryKnown
+        self.ordinaryShortWord = ordinaryShortWord
+    }
+}
+
 public struct CorrectionCandidate: Equatable, Sendable {
     public let range: NSRange
     public let original: String
@@ -59,7 +71,7 @@ public enum AutomaticCorrection {
             guard token.utf16.count <= 64,
                   LayoutConverter.isSafeAutomaticContext(in: text, range: NSRange(token.startIndex..<token.endIndex, in: text)) else { return nil }
             let word = token.trimmingCharacters(in: .punctuationCharacters)
-            return word.count >= 3 ? word : nil
+            return word.isEmpty ? nil : word
         }
     }
 
@@ -72,6 +84,8 @@ public enum AutomaticCorrection {
             self.targetWords = targetWords
         }
 
+        public var favorsTarget: Bool { targetWords > sourceWords }
+
         public func supports(_ candidate: CorrectionCandidate) -> Bool {
             guard targetWords > 0 else { return false }
             // Short function words can belong to either side of a bilingual
@@ -83,6 +97,17 @@ public enum AutomaticCorrection {
 
     public static func requiresContext(_ candidate: CorrectionCandidate, sourceKnown: Bool?) -> Bool {
         candidate.original.count <= 2 || (candidate.sourceNeedsDictionaryCheck && sourceKnown == true)
+    }
+
+    public static func requiresContext(_ candidate: CorrectionCandidate, sourceEvidence: WordEvidence, targetEvidence: WordEvidence) -> Bool {
+        if hasImmediateShortWordEvidence(candidate, source: sourceEvidence, target: targetEvidence) { return false }
+        return requiresContext(candidate, sourceKnown: sourceEvidence.dictionaryKnown)
+    }
+
+    private static func hasImmediateShortWordEvidence(_ candidate: CorrectionCandidate, source: WordEvidence, target: WordEvidence) -> Bool {
+        candidate.direction == .englishToRussian && candidate.original.count <= 2 &&
+            source.dictionaryKnown != nil && source.ordinaryShortWord == false &&
+            target.dictionaryKnown == true && target.ordinaryShortWord == true
     }
 
     public static func isEligibleTarget(_ candidate: CorrectionCandidate) -> Bool {
@@ -105,5 +130,26 @@ public enum AutomaticCorrection {
         let contextSupportsTarget = contextEvidence?.supports(candidate) ?? targetContextKnown
         if requiresContext(candidate, sourceKnown: sourceKnown) { return contextSupportsTarget }
         return !candidate.sourceNeedsDictionaryCheck || sourceKnown == false
+    }
+
+    public static func shouldCorrect(_ candidate: CorrectionCandidate, sourceEvidence: WordEvidence, targetEvidence: WordEvidence, contextEvidence: ContextEvidence? = nil) -> Bool {
+        guard isEligibleTarget(candidate),
+              !candidate.sourceNeedsDictionaryCheck || sourceEvidence.dictionaryKnown != nil else { return false }
+        if hasImmediateShortWordEvidence(candidate, source: sourceEvidence, target: targetEvidence) {
+            // Isolated weak tokens can be resolved immediately, but surrounding
+            // prose in their source language is stronger evidence to keep them.
+            return contextEvidence.map { $0.targetWords >= $0.sourceWords } ?? true
+        }
+        // A two-consonant Russian abbreviation need not be in the dictionary.
+        // Only a dominant Russian context may resolve that ambiguity; never
+        // treat a missing/unavailable dictionary result as a rejected spelling.
+        if candidate.direction == .englishToRussian, candidate.replacement.count == 2,
+           targetEvidence.dictionaryKnown == false, sourceEvidence.ordinaryShortWord == false,
+           contextEvidence?.favorsTarget == true,
+           candidate.replacement.lowercased().allSatisfy({ "бвгджзйклмнпрстфхцчшщ".contains($0) }) {
+            return true
+        }
+        return shouldCorrect(candidate, sourceKnown: sourceEvidence.dictionaryKnown,
+                             targetKnown: targetEvidence.dictionaryKnown, contextEvidence: contextEvidence)
     }
 }

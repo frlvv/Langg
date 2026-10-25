@@ -15,6 +15,24 @@ public struct TextState: Equatable, Sendable {
         return TextState(text: text.replacingCharacters(in: caret, with: input),
                          selection: NSRange(location: selection.location + input.utf16.count, length: 0))
     }
+
+    /// Contenteditable fields can expose a nonbreaking space for a physical
+    /// space key. Compare only equal-width space representations when matching
+    /// forwarded input; keep the captured text and every UTF-16 offset intact.
+    public func matchesEditorState(_ other: TextState?) -> Bool {
+        guard let other, selection == other.selection else { return false }
+        return Self.editorTextMatches(text, other.text)
+    }
+
+    public static func editorTextMatches(_ lhs: String, _ rhs: String) -> Bool {
+        lhs.utf16.elementsEqual(rhs.utf16) { left, right in
+            left == right || (isEditorSpace(left) && isEditorSpace(right))
+        }
+    }
+
+    private static func isEditorSpace(_ value: UInt16) -> Bool {
+        value == 0x0020 || value == 0x00A0 || value == 0x2007 || value == 0x202F
+    }
 }
 
 public struct TextReplacement: Sendable {
@@ -119,9 +137,14 @@ public extension TextEditor {
     private static func waitForState<Editor: TextEditor>(_ expected: TextState, allowing previous: TextState,
                                                         field: Editor.Field, editor: Editor) async -> Bool {
         for attempt in 0..<16 {
-            guard let current = editor.read(), current.field == field else { return false }
-            if current.state == expected { return true }
-            guard current.state == previous else { return false }
+            // The AX tree can briefly be unavailable while a contenteditable
+            // commits selection or text. Only a verified different field/state
+            // invalidates the attempt; a missing read uses the existing budget.
+            if let current = editor.read() {
+                guard current.field == field else { return false }
+                if current.state == expected { return true }
+                guard current.state == previous else { return false }
+            }
             if attempt < 15 { await waitForAXUpdate() }
         }
         return false
@@ -130,11 +153,13 @@ public extension TextEditor {
     private static func waitForText<Editor: TextEditor>(_ expected: String, allowing previous: TextState,
                                                        field: Editor.Field, editor: Editor, attempts: Int) async -> Bool {
         for attempt in 0..<attempts {
-            guard let current = editor.read(), current.field == field else { return false }
-            if current.state.text == expected { return true }
-            // A selection may briefly collapse while contenteditable commits
-            // its edit. Do not treat that intermediate AX read as a failure.
-            guard current.state.text == previous.text else { return false }
+            if let current = editor.read() {
+                guard current.field == field else { return false }
+                if current.state.text == expected { return true }
+                // A selection may briefly collapse while contenteditable commits
+                // its edit. Do not treat that intermediate AX read as a failure.
+                guard current.state.text == previous.text else { return false }
+            }
             if attempt + 1 < attempts { await waitForAXUpdate() }
         }
         return false

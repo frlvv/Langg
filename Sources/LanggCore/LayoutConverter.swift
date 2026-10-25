@@ -26,6 +26,10 @@ public enum LayoutConverter {
     public static func isLayoutLetter(_ c: Character) -> Bool { isEnglishLetter(c) || isRussianLetter(c) }
     public static func isPhysicalLetterKey(_ c: Character) -> Bool { isLayoutLetter(c) || punctuationKeys.contains(c) }
 
+    public static func isUnambiguousWordBoundary(_ character: Character) -> Bool {
+        character.isWhitespace || (character.isPunctuation && !isPhysicalLetterKey(character))
+    }
+
     // Spell check may silently omit leading punctuation keyboard letters.
     public static func isAlphabeticWord(_ text: String, direction: LayoutDirection) -> Bool {
         let characters = Array(text)
