@@ -4,7 +4,6 @@ import SwiftUI
 @MainActor final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     static let windowID = NSUserInterfaceItemIdentifier("settings")
     private let recorder: ShortcutRecorder
-
     init(monitor: InputMonitor) {
         recorder = monitor.shortcutRecorder
         let window = NSWindow(
@@ -16,7 +15,8 @@ import SwiftUI
         window.identifier = Self.windowID
         window.isReleasedWhenClosed = false
         window.hidesOnDeactivate = false
-        window.titlebarAppearsTransparent = true
+        window.titlebarAppearsTransparent = false
+        window.toolbarStyle = .unified
         window.titleVisibility = .hidden
         window.animationBehavior = .documentWindow
         window.level = .normal
@@ -29,6 +29,7 @@ import SwiftUI
     }
 
     required init?(coder: NSCoder) { nil }
+
 
     func showSettings() {
         guard let window else { return }

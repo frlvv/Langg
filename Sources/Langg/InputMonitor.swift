@@ -382,7 +382,7 @@ import LanggCore
                 shortcutRecorder.recordModifiers(event.flags.rawValue)
                 modifierChord.reset()
             } else if binding.isModifierOnly, modifierChord.observeModifiers(event.flags.rawValue),
-                      !IsSecureEventInputEnabled(), accessibilityGranted, !ownApp {
+                      !IsSecureEventInputEnabled(), accessibilityGranted {
                 invalidate()
                 _ = InputSources.toggle()
             }

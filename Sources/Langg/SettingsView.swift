@@ -34,6 +34,7 @@ struct SettingsView: View {
     @ObservedObject private var recorder: ShortcutRecorder
     @ObservedObject private var updates = UpdateController.shared
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.undoManager) private var undoManager
     @State private var section: SettingsSection? = .general
     @State private var word = ""
@@ -41,6 +42,7 @@ struct SettingsView: View {
     @State private var wordError: String?
     @StateObject private var loginItem = LoginItemController()
     @StateObject private var permissions = PermissionManagement()
+    @State private var confirmingPermissionRevocation = false
     @State private var applicationPanel: NSOpenPanel?
     @FocusState private var wordFocused: Bool
 
@@ -86,7 +88,8 @@ struct SettingsView: View {
                             .frame(width: 24, height: 24)
                             .background(item.color.gradient, in: RoundedRectangle(cornerRadius: 6))
                             .accessibilityHidden(true)
-                        Text(item.rawValue).font(.system(size: 13, weight: .medium))
+                        Text(item.rawValue)
+                            .font(.system(size: 13, weight: (section ?? .general) == item ? .semibold : .regular))
                     }
                     .padding(.vertical, 3)
                     .accessibilityElement(children: .combine)
@@ -98,7 +101,7 @@ struct SettingsView: View {
         } detail: {
             ZStack(alignment: .top) {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 22) {
+                    VStack(alignment: .leading, spacing: 20) {
                         switch section ?? .general {
                         case .general: general
                         case .shortcuts: shortcuts
@@ -106,18 +109,29 @@ struct SettingsView: View {
                         case .about: about
                         }
                     }
+                    .font(.system(size: 13))
                     .background(alignment: .topLeading) {
                         OverlayScrollbars().frame(width: 0, height: 0)
                     }
-                    .frame(maxWidth: 580, alignment: .leading)
-                    .padding(28)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 24)
+                    .padding(.top, 12)
+                    .padding(.bottom, 28)
                     .frame(maxWidth: .infinity, alignment: .top)
                 }
                 .id(section)
-                .transition(.opacity)
+                .modifier(SettingsScrollEdge())
             }
-            .background(Color(nsColor: .windowBackgroundColor))
-            .animation(.easeOut(duration: reduceMotion ? 0.1 : 0.16), value: section)
+            .background(colorScheme == .dark ? Color(white: 0.141) : Color(nsColor: .windowBackgroundColor))
+            .toolbarBackground(.automatic, for: .windowToolbar)
+            .toolbar {
+                if #available(macOS 26.0, *) {
+                    ToolbarItem(id: "settingsTitle", placement: .navigation) { settingsTitle }
+                        .sharedBackgroundVisibility(.hidden)
+                } else {
+                    ToolbarItem(id: "settingsTitle", placement: .navigation) { settingsTitle }
+                }
+            }
         }
         .onAppear {
             monitor.start()
@@ -125,10 +139,12 @@ struct SettingsView: View {
         }
         .onDisappear {
             recorder.stop()
+            confirmingPermissionRevocation = false
             applicationPanel?.cancel(nil)
         }
         .onChange(of: section) { _, _ in
             recorder.stop()
+            confirmingPermissionRevocation = false
             wordFocused = false
         }
         .onChange(of: word) { _, _ in wordError = nil }
@@ -141,9 +157,21 @@ struct SettingsView: View {
         }
     }
 
+    private var settingsTitle: some View {
+        Text((section ?? .general).rawValue)
+            .font(.system(size: 20, weight: .semibold))
+            .tracking(0.1)
+            .frame(width: 220, alignment: .leading)
+            .padding(.leading, 16)
+            .offset(y: 0.5)
+            .opacity(section == .about ? 0 : 1)
+            .accessibilityHidden(section == .about)
+            .transaction { $0.animation = nil }
+            .accessibilityAddTraits(.isHeader)
+    }
+
     private var general: some View {
         Group {
-            PageIntro("Основные")
             SettingsBlock {
                 HStack(spacing: 14) {
                     Image(systemName: ready ? "checkmark.circle.fill"
@@ -178,6 +206,7 @@ struct SettingsView: View {
                 settingToggle("Уведомления у курсора", subtitle: "Показывать, что текст исправлен.",
                               isOn: $settings.notifications)
             }
+            menuBarAppearance
             SettingsBlock {
                 settingToggle("Запускать при входе", isOn: Binding(
                     get: { loginItem.isRegistered }, set: loginItem.setEnabled))
@@ -194,20 +223,41 @@ struct SettingsView: View {
             }
             SettingsBlock("Разрешения") {
                 VStack(alignment: .leading, spacing: 12) {
-                    SettingLabel("Доступ к вводу", subtitle: "Управляйте доступом Langg в настройках macOS.")
-                    HStack(spacing: 12) {
-                        Button("Универсальный доступ…", action: permissions.openAccessibility)
-                        Button("Мониторинг ввода…", action: permissions.openInputMonitoring)
-                    }
-                    .buttonStyle(.link)
-                    Button(permissions.isRevoking ? "Отзыв разрешений…" : "Отозвать разрешения") {
-                        Task {
-                            if await permissions.revoke() {
-                                monitor.permissionsWereRevoked()
+                    HStack(alignment: .top, spacing: 16) {
+                        SettingLabel("Доступ к вводу", subtitle: "Управляйте доступом Langg в настройках macOS.")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        HStack(spacing: 6) {
+                            if confirmingPermissionRevocation {
+                                Button("Отозвать", role: .destructive) {
+                                    withAnimation(motion) { confirmingPermissionRevocation = false }
+                                    Task {
+                                        if await permissions.revoke() {
+                                            monitor.permissionsWereRevoked()
+                                        }
+                                    }
+                                }
+                                .help("Автоисправление и горячие клавиши перестанут работать до повторного разрешения доступа")
+                                Button("Отмена") {
+                                    withAnimation(motion) { confirmingPermissionRevocation = false }
+                                }
+                                .keyboardShortcut(.cancelAction)
+                                .transition(.opacity)
+                            } else {
+                                Button(permissions.isRevoking ? "Отзыв разрешений…" : "Отозвать разрешения") {
+                                    withAnimation(motion) { confirmingPermissionRevocation = true }
+                                }
+                                .transition(.opacity)
                             }
                         }
+                        .buttonStyle(.bordered)
+                        .disabled(permissions.isRevoking)
+                        .fixedSize()
+                        .animation(motion, value: confirmingPermissionRevocation)
                     }
-                    .disabled(permissions.isRevoking)
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 18) { permissionSettingsLinks }
+                        VStack(alignment: .leading, spacing: 12) { permissionSettingsLinks }
+                    }
                     if let message = permissions.message {
                         Text(message)
                             .font(.footnote).foregroundStyle(.secondary)
@@ -218,6 +268,40 @@ struct SettingsView: View {
             }
         }
         .toggleStyle(.switch)
+    }
+
+    private var permissionSettingsLinks: some View {
+        Group {
+            permissionSettingsLink("Универсальный доступ", permission: .accessibility,
+                                   action: permissions.openAccessibility)
+            permissionSettingsLink("Мониторинг ввода", permission: .inputMonitoring,
+                                   action: permissions.openInputMonitoring)
+        }
+    }
+
+    private func permissionSettingsLink(_ title: String, permission: InputPermission,
+                                        action: @escaping () -> Void) -> some View {
+        let granted = monitor.permissionStatus(for: permission) == .verified
+        return Button(action: action) {
+            HStack(spacing: 6) {
+                if granted {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 11, weight: .semibold))
+                        .accessibilityHidden(true)
+                }
+                Text(title)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold, design: .rounded))
+                    .accessibilityHidden(true)
+            }
+            .foregroundStyle(granted ? Color.green : Color.accentColor)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityValue(granted ? "Разрешено" : "Не подтверждено")
+        .accessibilityHint("Открыть раздел в настройках macOS")
+        .help("Открыть \(title.lowercased()) в настройках macOS")
     }
 
     private var permissionRows: some View {
@@ -262,6 +346,82 @@ struct SettingsView: View {
         }
     }
 
+    private var menuBarAppearance: some View {
+        SettingsBlock {
+            HStack(alignment: .top, spacing: 16) {
+                Text("Значок в строке меню")
+                Spacer(minLength: 0)
+                HStack(alignment: .top, spacing: 12) {
+                    menuBarOption(.appIcon, title: "Логотип Langg") {
+                        Image(nsImage: LanggMark.menuImage)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 24, height: 24)
+                    }
+                    menuBarOption(.inputSource, title: "Текущая раскладка") {
+                        HStack(spacing: 8) {
+                            Image(nsImage: MenuBarSymbols.preview(for: "РУ", primaryLanguage: settings.primaryMenuBarLanguage))
+                            Image(nsImage: MenuBarSymbols.preview(for: "A", primaryLanguage: settings.primaryMenuBarLanguage))
+                        }
+                    }
+                }
+            }
+            .padding(16)
+            if settings.menuBarIconStyle == .inputSource {
+                rowDivider
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("Основной язык")
+                        Spacer(minLength: 16)
+                        Picker("Основной язык", selection: $settings.primaryMenuBarLanguage) {
+                            Text("Русский").tag(MenuBarPrimaryLanguage.russian)
+                            Text("Английский").tag(MenuBarPrimaryLanguage.english)
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .frame(width: 140, alignment: .trailing)
+                        .help("Основной язык выделяется заливкой значка. Раскладка клавиатуры не меняется.")
+                        .accessibilityHint("Определяет заливку значка. Не переключает раскладку клавиатуры.")
+                    }
+                    Text("Чтобы убрать второй индикатор, откройте [«Клавиатура»](x-apple.systempreferences:com.apple.Keyboard-Settings.extension) → «Ввод текста» → «Изменить» и выключите «Показывать меню ввода в строке меню».")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .help("Открыть настройки клавиатуры. В разделе «Ввод текста» нажмите «Изменить» и выключите «Показывать меню ввода в строке меню».")
+                        .accessibilityHint("Открывает настройки клавиатуры macOS. Системный индикатор нужно выключить вручную.")
+                }
+                .padding(16)
+            }
+        }
+    }
+
+    private func menuBarOption<Preview: View>(_ style: MenuBarIconStyle, title: String,
+                                               @ViewBuilder preview: () -> Preview) -> some View {
+        let selected = settings.menuBarIconStyle == style
+        return Button {
+            settings.menuBarIconStyle = style
+        } label: {
+            VStack(spacing: 6) {
+                preview()
+                    .foregroundStyle(.primary)
+                    .frame(width: style == .appIcon ? 64 : 92, height: 38)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 12)
+                            .strokeBorder(selected ? Color.accentColor : Color.clear, lineWidth: 2)
+                    }
+                    .accessibilityHidden(true)
+                Text(title)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 12))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
     private func permissionRow(_ title: String, status: PermissionSetupStatus, action: @escaping () -> Void) -> some View {
         HStack(spacing: 12) {
             Text(title)
@@ -294,7 +454,7 @@ struct SettingsView: View {
 
     private var shortcuts: some View {
         Group {
-            PageIntro("Горячие клавиши", subtitle: "Нажмите на сочетание, чтобы изменить его.")
+            PageIntro("Нажмите на сочетание, чтобы изменить его.")
             SettingsBlock {
                 shortcutRow("Исправить текст", subtitle: "Выделение или последнее слово", command: .correction)
                 rowDivider
@@ -344,7 +504,7 @@ struct SettingsView: View {
 
     private var exclusions: some View {
         Group {
-            PageIntro("Исключения", subtitle: "Здесь раскладка меняется только по горячей клавише.")
+            PageIntro("Здесь раскладка меняется только по горячей клавише.")
             SettingsBlock("Приложения") {
                 if settings.excludedApps.isEmpty { EmptyRow("Нет исключений", symbol: "app.dashed") }
                 ForEach(settings.excludedApps, id: \.self) { id in
@@ -508,10 +668,10 @@ struct SettingsView: View {
     }
 
     private var about: some View {
-        VStack(spacing: 22) {
+        VStack(spacing: 20) {
             LanggAboutMark()
             VStack(spacing: 6) {
-                Text("Langg").font(.system(size: 30, weight: .bold)).tracking(-0.6)
+                Text("Langg").font(.system(size: 28, weight: .semibold))
                 Text("Версия \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0")")
                     .font(.subheadline).foregroundStyle(.secondary)
             }
@@ -547,26 +707,19 @@ struct SettingsView: View {
             }
             Text("© 2026 Langg").font(.footnote).foregroundStyle(.secondary)
         }
-        .frame(maxWidth: .infinity).padding(.top, 26)
+        .frame(maxWidth: .infinity).padding(.top, 12)
     }
 
-    private var rowDivider: some View { Divider().padding(.leading, 16) }
+    private var rowDivider: some View { Divider().padding(.horizontal, 16) }
 }
 
 private struct PageIntro: View {
-    let title: String
-    var subtitle: String?
-    init(_ title: String, subtitle: String? = nil) { self.title = title; self.subtitle = subtitle }
+    let subtitle: String
+    init(_ subtitle: String) { self.subtitle = subtitle }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title).font(.system(size: 26, weight: .bold)).tracking(-0.5)
-                .accessibilityAddTraits(.isHeader)
-            if let subtitle {
-                Text(subtitle).font(.subheadline).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
+        Text(subtitle).font(.subheadline).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -577,7 +730,7 @@ private struct SettingLabel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(title).fontWeight(.medium)
+            Text(title).font(.system(size: 13))
             if let subtitle {
                 Text(subtitle).font(.subheadline).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -589,6 +742,7 @@ private struct SettingLabel: View {
 private struct SettingsBlock<Content: View>: View {
     var title: String?
     let content: Content
+    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.colorSchemeContrast) private var contrast
     init(_ title: String? = nil, @ViewBuilder content: () -> Content) {
         self.title = title
@@ -598,16 +752,21 @@ private struct SettingsBlock<Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
             if let title {
-                Text(title).font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
-                    .padding(.leading, 4).accessibilityAddTraits(.isHeader)
+                Text(title).font(.system(size: 13, weight: .semibold))
+                    .padding(.leading, 10).accessibilityAddTraits(.isHeader)
             }
             VStack(alignment: .leading, spacing: 0) { content }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+                .background(colorScheme == .dark
+                            ? Color(white: contrast == .increased ? 0.235 : 0.173)
+                            : Color(nsColor: .controlBackgroundColor),
+                            in: RoundedRectangle(cornerRadius: 12))
                 .overlay {
-                    RoundedRectangle(cornerRadius: 12)
-                        .strokeBorder(Color.primary.opacity(contrast == .increased ? 0.45 : 0.07))
-                        .allowsHitTesting(false)
+                    if contrast == .increased {
+                        RoundedRectangle(cornerRadius: 12)
+                            .strokeBorder(Color.primary.opacity(0.45))
+                            .allowsHitTesting(false)
+                    }
                 }
         }
     }
@@ -630,6 +789,14 @@ private struct EmptyRow: View {
     var body: some View {
         Label(title, systemImage: symbol).font(.subheadline).foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, minHeight: 60)
+    }
+}
+
+private struct SettingsScrollEdge: ViewModifier {
+    @ViewBuilder func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content.scrollEdgeEffectStyle(.soft, for: .top)
+        } else { content }
     }
 }
 

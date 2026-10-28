@@ -4,6 +4,7 @@ import Foundation
 import LanggCore
 
 @MainActor enum InputSources {
+    static let selectionRequested = Notification.Name("Langg.inputSourceSelectionRequested")
     private static let supportedIDs: [String: [String]] = [
         "en": ["com.apple.keylayout.US", "com.apple.keylayout.ABC"],
         "ru": ["com.apple.keylayout.Russian", "com.apple.keylayout.RussianWin"]
@@ -24,8 +25,8 @@ import LanggCore
 
     static func toggle() -> Bool {
         guard let current = currentIdentifier() else { return false }
-        if supportedIDs["ru"]?.contains(current) == true { return select("en") }
-        if supportedIDs["en"]?.contains(current) == true { return select("ru") }
+        if supportedIDs["ru"]?.contains(current) == true { return requestSelection("en") }
+        if supportedIDs["en"]?.contains(current) == true { return requestSelection("ru") }
         return false
     }
 
@@ -36,7 +37,7 @@ import LanggCore
 
     static func requestSelection(_ language: String) -> Bool {
         guard let source = source(for: language) else { return false }
-        return TISSelectInputSource(source) == noErr
+        return request(source)
     }
 
     static func requestSelection(identifier id: String) -> Bool {
@@ -44,7 +45,13 @@ import LanggCore
               let source = enabledSelectableSources().first(where: { identifier($0) == id }) else { return false }
         // Selection is asynchronous. A stale immediate readback cannot mean
         // rejection after macOS has already accepted the source change.
-        return TISSelectInputSource(source) == noErr
+        return request(source)
+    }
+
+    private static func request(_ source: TISInputSource) -> Bool {
+        guard TISSelectInputSource(source) == noErr else { return false }
+        NotificationCenter.default.post(name: selectionRequested, object: nil)
+        return true
     }
 
     /// Translate only physical printable presses still held by InputReplayGate.

@@ -5,10 +5,22 @@ enum ShortcutCommand: CaseIterable {
     case correction, switchLayout, undo
 }
 
+enum MenuBarIconStyle: String, CaseIterable {
+    case appIcon, inputSource
+}
+
+enum MenuBarPrimaryLanguage: String, CaseIterable {
+    case english = "en", russian = "ru"
+
+    var badge: String { self == .russian ? "РУ" : "A" }
+}
+
 @MainActor final class AppSettings: ObservableObject {
     @Published var automatic = true { didSet { save() } }
     @Published var notifications = true { didSet { save() } }
     @Published var undoRestoresLayout = true { didSet { save() } }
+    @Published var menuBarIconStyle: MenuBarIconStyle = .appIcon { didSet { save() } }
+    @Published var primaryMenuBarLanguage: MenuBarPrimaryLanguage = .english { didSet { save() } }
     @Published var excludedApps: [String] = ["com.apple.Terminal", "com.googlecode.iterm2"] { didSet { save() } }
     @Published var excludedWords: [String] = [] { didSet { save() } }
     @Published private(set) var correctionShortcut = Shortcut.correction { didSet { save() } }
@@ -21,6 +33,8 @@ enum ShortcutCommand: CaseIterable {
         var automatic: Bool
         var notifications: Bool
         var undoRestoresLayout: Bool
+        var menuBarIconStyle: String
+        var primaryMenuBarLanguage: String
         var excludedApps: [String]
         var excludedWords: [String]
         var correctionShortcut: Shortcut
@@ -28,12 +42,16 @@ enum ShortcutCommand: CaseIterable {
         var undoShortcut: Shortcut
 
         init(automatic: Bool = true, notifications: Bool = true, undoRestoresLayout: Bool = true,
+             menuBarIconStyle: String = MenuBarIconStyle.appIcon.rawValue,
+             primaryMenuBarLanguage: String = MenuBarPrimaryLanguage.english.rawValue,
              excludedApps: [String] = ["com.apple.Terminal", "com.googlecode.iterm2"],
              excludedWords: [String] = [], correctionShortcut: Shortcut = .correction,
              switchShortcut: Shortcut = .switchLayout, undoShortcut: Shortcut = .undo) {
             self.automatic = automatic
             self.notifications = notifications
             self.undoRestoresLayout = undoRestoresLayout
+            self.menuBarIconStyle = menuBarIconStyle
+            self.primaryMenuBarLanguage = primaryMenuBarLanguage
             self.excludedApps = excludedApps
             self.excludedWords = excludedWords
             self.correctionShortcut = correctionShortcut
@@ -44,6 +62,8 @@ enum ShortcutCommand: CaseIterable {
         private enum CodingKeys: String, CodingKey {
             case automatic, notifications, undoRestoresLayout, excludedApps, excludedWords
             case correctionShortcut, switchShortcut, undoShortcut
+            case menuBarIconStyle
+            case primaryMenuBarLanguage
         }
 
         init(from decoder: any Decoder) throws {
@@ -52,6 +72,8 @@ enum ShortcutCommand: CaseIterable {
             automatic = try values.decodeIfPresent(Bool.self, forKey: .automatic) ?? fallback.automatic
             notifications = try values.decodeIfPresent(Bool.self, forKey: .notifications) ?? fallback.notifications
             undoRestoresLayout = try values.decodeIfPresent(Bool.self, forKey: .undoRestoresLayout) ?? fallback.undoRestoresLayout
+            menuBarIconStyle = try values.decodeIfPresent(String.self, forKey: .menuBarIconStyle) ?? fallback.menuBarIconStyle
+            primaryMenuBarLanguage = try values.decodeIfPresent(String.self, forKey: .primaryMenuBarLanguage) ?? fallback.primaryMenuBarLanguage
             excludedApps = try values.decodeIfPresent([String].self, forKey: .excludedApps) ?? fallback.excludedApps
             excludedWords = try values.decodeIfPresent([String].self, forKey: .excludedWords) ?? fallback.excludedWords
             correctionShortcut = try values.decodeIfPresent(Shortcut.self, forKey: .correctionShortcut) ?? fallback.correctionShortcut
@@ -81,6 +103,8 @@ enum ShortcutCommand: CaseIterable {
             automatic = stored.automatic
             notifications = stored.notifications
             undoRestoresLayout = stored.undoRestoresLayout
+            menuBarIconStyle = MenuBarIconStyle(rawValue: stored.menuBarIconStyle) ?? .appIcon
+            primaryMenuBarLanguage = MenuBarPrimaryLanguage(rawValue: stored.primaryMenuBarLanguage) ?? .english
             excludedApps = stored.excludedApps
             excludedWords = stored.excludedWords
             correctionShortcut = Self.availableShortcut(stored.correctionShortcut, avoiding: [])
@@ -178,6 +202,8 @@ enum ShortcutCommand: CaseIterable {
     private func save() {
         guard !isRestoring else { return }
         let stored = Stored(automatic: automatic, notifications: notifications, undoRestoresLayout: undoRestoresLayout,
+                            menuBarIconStyle: menuBarIconStyle.rawValue,
+                            primaryMenuBarLanguage: primaryMenuBarLanguage.rawValue,
                             excludedApps: excludedApps, excludedWords: excludedWords,
                             correctionShortcut: correctionShortcut, switchShortcut: switchShortcut,
                             undoShortcut: undoShortcut)
