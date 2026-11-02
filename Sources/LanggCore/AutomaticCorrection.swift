@@ -140,15 +140,6 @@ public enum AutomaticCorrection {
             // prose in their source language is stronger evidence to keep them.
             return contextEvidence.map { $0.targetWords >= $0.sourceWords } ?? true
         }
-        // A two-consonant Russian abbreviation need not be in the dictionary.
-        // Only a dominant Russian context may resolve that ambiguity; never
-        // treat a missing/unavailable dictionary result as a rejected spelling.
-        if candidate.direction == .englishToRussian, candidate.replacement.count == 2,
-           targetEvidence.dictionaryKnown == false, sourceEvidence.ordinaryShortWord == false,
-           contextEvidence?.favorsTarget == true,
-           candidate.replacement.lowercased().allSatisfy({ "бвгджзйклмнпрстфхцчшщ".contains($0) }) {
-            return true
-        }
         return shouldCorrect(candidate, sourceKnown: sourceEvidence.dictionaryKnown,
                              targetKnown: targetEvidence.dictionaryKnown, contextEvidence: contextEvidence)
     }

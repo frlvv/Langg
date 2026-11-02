@@ -39,6 +39,22 @@ public struct CorrectionHistory {
                     return
                 }
             }
+            var trial = before
+            var inverses: [TextState] = []
+            for entry in entries.sorted(by: { $0.range.location > $1.range.location }) {
+                guard let original = entry.original,
+                      let inverse = TextReplacement(before: trial, range: entry.range, replacement: original) else { continue }
+                trial = inverse.after
+                inverses.append(trial)
+                guard inverses.count > 1,
+                      let caret = LayoutConverter.validatedRange(trial.selection, in: trial.text),
+                      updated.utf16.count >= trial.text.utf16.count,
+                      updated.hasPrefix(trial.text[..<caret.lowerBound]),
+                      updated.hasSuffix(trial.text[caret.upperBound...]) else { continue }
+                for state in inverses { reconcile(with: state.text) }
+                reconcile(with: updated)
+                return
+            }
         }
         let old = Array(text.utf16)
         let new = Array(updated.utf16)

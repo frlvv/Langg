@@ -182,7 +182,7 @@ import LanggCore
         var boundary: Int?
         var attempts = 0
         var recovered = false
-        while attempts < 5 || (attempts < 64 && backend.isWarmingUp(pid: binding.pid)) {
+        while attempts < 20 || (attempts < 64 && backend.isWarmingUp(pid: binding.pid)) {
             attempts += 1
             guard current(binding, revision: revision) else { return }
             var snapshot = capture()
@@ -311,6 +311,13 @@ import LanggCore
         InputDiagnostics.record("replacementAttempt")
         guard let written = await backend.replace(ready, edit: edit, captureBounds: settings.notifications) else {
             InputDiagnostics.record("replacementWriteFailed")
+            // An unconfirmed external write may already have changed the editor.
+            // Do not revisit the same surviving word on subsequent delimiters.
+            if valid(revision), let current = capture(), current.field == ready.field,
+               LayoutConverter.substring(current.text, range: edit.range) == edit.original {
+                reconcileHistory(with: current)
+                history.rememberUnchanged(edit.range, in: current.text)
+            }
             if valid(revision) { onFeedback("Поле не подтвердило замену. Проверьте текст перед повторным исправлением.") }
             return nil
         }

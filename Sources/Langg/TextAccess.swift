@@ -647,6 +647,21 @@ struct TextSnapshot {
         // of the visible selection interval whenever a pre-edit anchor exists.
         let bounds = selectedBounds == nil ? nil : textBounds(snapshot, range: edit.range)
         if let bounds { selectedBounds?(bounds) }
+        var edit = edit
+        // Figma's canvas selection is separate from its accessibility mirror.
+        // Include the trailing delimiter so keyboard selection and paste leave
+        // the caret in its original position without a second selection write.
+        if NSRunningApplication(processIdentifier: snapshot.pid)?.bundleIdentifier == "com.figma.Desktop",
+           edit.before.selection.length == 0,
+           NSMaxRange(edit.range) <= edit.before.selection.location,
+           let suffix = LayoutConverter.substring(edit.before.text, range: NSRange(
+               location: NSMaxRange(edit.range), length: edit.before.selection.location - NSMaxRange(edit.range))),
+           suffix.count <= 2, suffix.allSatisfy({ $0 == " " }),
+           let expanded = TextReplacement(before: edit.before,
+               range: NSRange(location: edit.range.location, length: edit.before.selection.location - edit.range.location),
+               replacement: edit.replacement + suffix) {
+            edit = expanded
+        }
         guard let after = await TextReplacementTransaction.applyWithFallback(edit, to: snapshot.field,
                 using: AXEditor(edit: edit, selectedBounds: bounds == nil ? selectedBounds : nil)) else {
             InputDiagnostics.record("replacementTransactionFailed")
@@ -684,7 +699,12 @@ struct TextSnapshot {
         let edit: TextReplacement
         let selectedBounds: ((CGRect) -> Void)?
 
+        private func isCanvasHost(_ field: TextFieldIdentity) -> Bool {
+            NSRunningApplication(processIdentifier: field.pid)?.bundleIdentifier == "com.figma.Desktop"
+        }
+
         func supportsDirectReplacement(in field: TextFieldIdentity) -> Bool {
+            if isCanvasHost(field) { return false }
             var settable = DarwinBoolean(false)
             let result = AXUIElementIsAttributeSettable(field.element, kAXSelectedTextAttribute as CFString, &settable)
             return result == .success && settable.boolValue
@@ -696,6 +716,40 @@ struct TextSnapshot {
         }
 
         func select(_ range: NSRange, in field: TextFieldIdentity) -> Bool {
+            if isCanvasHost(field) {
+                guard let current = read(), current.field == field else { return false }
+                if current.state.selection == range { return true }
+                if range == edit.before.selection, range.length == 0,
+                   current.state.text == edit.before.text, current.state.selection == edit.range,
+                   let source = CGEventSource(stateID: .privateState),
+                   let down = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_RightArrow), keyDown: true),
+                   let up = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_RightArrow), keyDown: false) {
+                    for event in [down, up] {
+                        event.flags = []
+                        event.setIntegerValueField(.eventSourceUserData, value: replacementMarker)
+                        event.postToPid(field.pid)
+                    }
+                    return true
+                }
+                guard range.length > 0, current.state.selection.length == 0,
+                      current.state.selection.location == NSMaxRange(range),
+                      let text = LayoutConverter.substring(current.state.text, range: range),
+                      !text.isEmpty, text.count <= 64, !text.contains("\n"),
+                      CGPreflightPostEventAccess(),
+                      let source = CGEventSource(stateID: .privateState) else { return false }
+                var events: [CGEvent] = []
+                for _ in text {
+                    for down in [true, false] {
+                        guard let event = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_LeftArrow), keyDown: down) else { return false }
+                        event.flags = .maskShift
+                        event.setIntegerValueField(.eventSourceUserData, value: replacementMarker)
+                        events.append(event)
+                    }
+                }
+                guard !Task.isCancelled else { return false }
+                for event in events { event.postToPid(field.pid) }
+                return true
+            }
             var value = CFRange(location: range.location, length: range.length)
             guard let axValue = AXValueCreate(.cfRange, &value) else { return false }
             return AXUIElementSetAttributeValue(field.element, kAXSelectedTextRangeAttribute as CFString, axValue) == .success
