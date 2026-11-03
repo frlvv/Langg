@@ -24,7 +24,13 @@ public enum LayoutConverter {
 
     public static func isRussianLetter(_ c: Character) -> Bool { toEnglish[c] != nil }
     public static func isLayoutLetter(_ c: Character) -> Bool { isEnglishLetter(c) || isRussianLetter(c) }
-    public static func isPhysicalLetterKey(_ c: Character) -> Bool { isLayoutLetter(c) || punctuationKeys.contains(c) }
+    public static func isPhysicalLetterKey(_ c: Character) -> Bool {
+        isLayoutLetter(c) || punctuationKeys.contains(physicalPunctuation(c))
+    }
+
+    private static func physicalPunctuation(_ character: Character) -> Character {
+        character == "‘" || character == "’" ? "'" : character
+    }
 
     public static func isUnambiguousWordBoundary(_ character: Character) -> Bool {
         character.isWhitespace || (character.isPunctuation && !isPhysicalLetterKey(character))
@@ -37,7 +43,7 @@ public enum LayoutConverter {
         return characters.enumerated().allSatisfy { index, character in
             if direction == .russianToEnglish { return isRussianLetter(character) }
             if isEnglishLetter(character) { return true }
-            return character == "'" && index > 0 && index + 1 < characters.count &&
+            return physicalPunctuation(character) == "'" && index > 0 && index + 1 < characters.count &&
                 isEnglishLetter(characters[index - 1]) && isEnglishLetter(characters[index + 1])
         }
     }
@@ -48,12 +54,13 @@ public enum LayoutConverter {
         var output = String()
         output.reserveCapacity(text.utf16.count)
         for (index, character) in characters.enumerated() {
-            guard let mapped = mapping[character] else { output.append(character); continue }
-            if direction == .englishToRussian, punctuation == .contextual, punctuationKeys.contains(character) {
+            let key = direction == .englishToRussian ? physicalPunctuation(character) : character
+            guard let mapped = mapping[key] else { output.append(character); continue }
+            if direction == .englishToRussian, punctuation == .contextual, punctuationKeys.contains(key) {
                 let nextIsLetter = index + 1 < characters.count && isEnglishLetter(characters[index + 1])
                 let atWordStart = index == 0 || characters[index - 1].isWhitespace
                 let internalKey = nextIsLetter && index > 0 && isEnglishLetter(characters[index - 1]) && !",.\"".contains(character)
-                let closing: [Character: Character] = ["[": "]", "{": "}", "<": ">", "\"": "\"", "'": "'"]
+                let closing: [Character: Character] = ["[": "]", "{": "}", "<": ">", "\"": "\"", "'": "'", "‘": "’", "’": "’"]
                 let isWrapper = closing[character].map { closingChar in
                     characters.dropFirst(index + 1).prefix(while: { !$0.isWhitespace }).contains(closingChar)
                 } ?? false
@@ -86,7 +93,7 @@ public enum LayoutConverter {
         var start = end
         while start > text.startIndex, isPhysicalLetterKey(text[text.index(before: start)]) { start = text.index(before: start) }
         guard start < end, text[start..<end].contains(where: isLayoutLetter) else { return [] }
-        let wrappers: [Character: Character] = ["[": "]", "{": "}", "<": ">", "\"": "\"", "'": "'"]
+        let wrappers: [Character: Character] = ["[": "]", "{": "}", "<": ">", "\"": "\"", "'": "'", "‘": "’", "’": "’"]
         if let first = text[start..<end].first, let last = text[start..<end].last,
            wrappers[first] == last, text[start..<end].count > 2 {
             start = text.index(after: start)

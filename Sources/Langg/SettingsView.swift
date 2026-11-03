@@ -133,6 +133,7 @@ struct SettingsView: View {
                 }
             }
         }
+        .background(SidebarToggleRemoval().frame(width: 0, height: 0))
         .onAppear {
             monitor.start()
             loginItem.refresh()
@@ -816,5 +817,35 @@ private struct ShortcutButtonStyle: ButtonStyle {
             .scaleEffect(configuration.isPressed && !reduceMotion ? 0.97 : 1)
             .opacity(configuration.isPressed ? 0.7 : 1)
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
+private struct SidebarToggleRemoval: NSViewRepresentable {
+    func makeNSView(context: Context) -> SidebarToggleAnchor { SidebarToggleAnchor() }
+    func updateNSView(_ view: SidebarToggleAnchor, context: Context) { view.removeToggle() }
+}
+private final class SidebarToggleAnchor: NSView {
+    private weak var observedToolbar: NSToolbar?
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        removeToggle()
+    }
+    deinit { NotificationCenter.default.removeObserver(self) }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    @objc private func toolbarChanged(_ notification: Notification) { removeToggle() }
+    func removeToggle() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let toolbar = self.window?.toolbar else { return }
+            if self.observedToolbar !== toolbar {
+                NotificationCenter.default.removeObserver(self)
+                self.observedToolbar = toolbar
+                NotificationCenter.default.addObserver(self, selector: #selector(self.toolbarChanged(_:)),
+                    name: Notification.Name("NSToolbarWillAddItemNotification"), object: toolbar)
+            }
+            for index in toolbar.items.indices.reversed() {
+                let id = toolbar.items[index].itemIdentifier.rawValue.lowercased()
+                if id.contains("sidebar") && id.contains("toggle") { toolbar.removeItem(at: index) }
+            }
+        }
     }
 }

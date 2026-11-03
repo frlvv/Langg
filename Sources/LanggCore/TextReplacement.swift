@@ -17,8 +17,8 @@ public struct TextState: Equatable, Sendable {
     }
 
     /// Contenteditable fields can expose a nonbreaking space for a physical
-    /// space key. Compare only equal-width space representations when matching
-    /// forwarded input; keep the captured text and every UTF-16 offset intact.
+    /// space key, or a curly apostrophe for the physical quote key.
+    /// Keep the captured text and every UTF-16 offset intact.
     public func matchesEditorState(_ other: TextState?) -> Bool {
         guard let other, selection == other.selection else { return false }
         return Self.editorTextMatches(text, other.text)
@@ -26,8 +26,13 @@ public struct TextState: Equatable, Sendable {
 
     public static func editorTextMatches(_ lhs: String, _ rhs: String) -> Bool {
         lhs.utf16.elementsEqual(rhs.utf16) { left, right in
-            left == right || (isEditorSpace(left) && isEditorSpace(right))
+            left == right || (isEditorSpace(left) && isEditorSpace(right)) ||
+                (isEditorApostrophe(left) && isEditorApostrophe(right))
         }
+    }
+
+    private static func isEditorApostrophe(_ value: UInt16) -> Bool {
+        value == 0x0027 || value == 0x2018 || value == 0x2019
     }
 
     private static func isEditorSpace(_ value: UInt16) -> Bool {

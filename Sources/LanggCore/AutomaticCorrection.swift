@@ -100,7 +100,8 @@ public enum AutomaticCorrection {
     }
 
     public static func requiresContext(_ candidate: CorrectionCandidate, sourceEvidence: WordEvidence, targetEvidence: WordEvidence) -> Bool {
-        if hasImmediateShortWordEvidence(candidate, source: sourceEvidence, target: targetEvidence) { return false }
+        if hasImmediateShortWordEvidence(candidate, source: sourceEvidence, target: targetEvidence) ||
+            hasEnglishAbbreviationEvidence(candidate, source: sourceEvidence, target: targetEvidence) { return false }
         return requiresContext(candidate, sourceKnown: sourceEvidence.dictionaryKnown)
     }
 
@@ -108,6 +109,14 @@ public enum AutomaticCorrection {
         candidate.direction == .englishToRussian && candidate.original.count <= 2 &&
             source.dictionaryKnown != nil && source.ordinaryShortWord == false &&
             target.dictionaryKnown == true && target.ordinaryShortWord == true
+    }
+
+    private static func hasEnglishAbbreviationEvidence(_ candidate: CorrectionCandidate, source: WordEvidence, target: WordEvidence) -> Bool {
+        // An unknown pair of Russian consonants can map to a recognised
+        // English abbreviation inside otherwise Russian prose.
+        candidate.direction == .russianToEnglish && candidate.original.count == 2 &&
+            source.dictionaryKnown == false && target.dictionaryKnown == true &&
+            candidate.original.lowercased().allSatisfy { "бвгджзйклмнпрстфхцчшщ".contains($0) }
     }
 
     public static func isEligibleTarget(_ candidate: CorrectionCandidate) -> Bool {
@@ -135,6 +144,7 @@ public enum AutomaticCorrection {
     public static func shouldCorrect(_ candidate: CorrectionCandidate, sourceEvidence: WordEvidence, targetEvidence: WordEvidence, contextEvidence: ContextEvidence? = nil) -> Bool {
         guard isEligibleTarget(candidate),
               !candidate.sourceNeedsDictionaryCheck || sourceEvidence.dictionaryKnown != nil else { return false }
+        if hasEnglishAbbreviationEvidence(candidate, source: sourceEvidence, target: targetEvidence) { return true }
         if hasImmediateShortWordEvidence(candidate, source: sourceEvidence, target: targetEvidence) {
             // Isolated weak tokens can be resolved immediately, but surrounding
             // prose in their source language is stronger evidence to keep them.
