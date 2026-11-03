@@ -26,6 +26,7 @@ enum MenuBarPrimaryLanguage: String, CaseIterable {
     @Published private(set) var correctionShortcut = Shortcut.correction { didSet { save() } }
     @Published private(set) var switchShortcut = Shortcut.switchLayout { didSet { save() } }
     @Published private(set) var undoShortcut = Shortcut.undo { didSet { save() } }
+    let correctionLearning: CorrectionLearning
     private let defaults: UserDefaults
     private var isRestoring = true
 
@@ -94,6 +95,7 @@ enum MenuBarPrimaryLanguage: String, CaseIterable {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        correctionLearning = CorrectionLearning(defaults: defaults)
         var shouldSaveMigration = false
         let currentData = defaults.data(forKey: "settings.v2")
         let stored = [currentData, defaults.data(forKey: "settings.v2.backup")]

@@ -13,6 +13,14 @@ struct TextFieldIdentity: Equatable {
 struct TextSnapshot {
     let field: TextFieldIdentity
     let state: TextState
+    let nativeSelection: NSRange?
+
+    init(field: TextFieldIdentity, state: TextState, nativeSelection: NSRange? = nil) {
+        self.field = field
+        self.state = state
+        self.nativeSelection = nativeSelection
+    }
+
     var element: AXUIElement { field.element }
     var pid: pid_t { field.pid }
     var text: String { state.text }
@@ -258,14 +266,62 @@ struct TextSnapshot {
         guard let text = string(field, kAXValueAttribute as CFString) else { InputDiagnostics.record("captureNoText"); return nil }
         guard text.utf16.count <= 100_000 else { InputDiagnostics.record("captureTextTooLong"); return nil }
         guard let selection = range(field) else { InputDiagnostics.record("captureNoSelection"); return nil }
-        guard let state = TextState(text: text, selection: selection) else { InputDiagnostics.record("captureInvalidSelection"); return nil }
+        let multiline = usesMultilineMarkers(pid: identity.pid, text: text)
+        let markerState = multiline ? multilineMarkerState(field, value: text, nativeSelection: selection) : nil
+        if multiline && markerState == nil { InputDiagnostics.record("captureMarkersUnavailable") }
+        guard let state = markerState ?? TextState(text: text, selection: selection) else {
+            InputDiagnostics.record("captureInvalidSelection")
+            return nil
+        }
         if InputDiagnostics.enabled {
             InputDiagnostics.record(focused(field).map { $0 ? "captureFocusedTrue" : "captureFocusedFalse" } ?? "captureFocusedUnknown")
-            InputDiagnostics.record(selection.length == 0 ? "captureSelectionCollapsed" : "captureSelectionNonempty")
-            InputDiagnostics.record(NSMaxRange(selection) == text.utf16.count ? "captureSelectionAtEnd" : "captureSelectionInterior")
+            InputDiagnostics.record(state.selection.length == 0 ? "captureSelectionCollapsed" : "captureSelectionNonempty")
+            InputDiagnostics.record(NSMaxRange(state.selection) == state.text.utf16.count ? "captureSelectionAtEnd" : "captureSelectionInterior")
         }
         InputDiagnostics.record("captureSuccess")
-        return TextSnapshot(field: identity, state: state)
+        return TextSnapshot(field: identity, state: state,
+                            nativeSelection: markerState != nil ? selection : nil)
+    }
+
+    private static func usesMultilineMarkers(pid: pid_t, text: String) -> Bool {
+        accessibilityClients[pid]?.isChromium == true && text.contains(where: \.isNewline)
+    }
+
+    // Chromium exposes paragraph breaks in AXValue that need not count toward
+    // its integer selection offset. Resolve the real position with text markers.
+    private static func multilineMarkerState(_ field: AXUIElement, value: String,
+                                             nativeSelection: NSRange) -> TextState? {
+        var rawFieldRange: CFTypeRef?
+        var rawSelection: CFTypeRef?
+        guard AXUIElementCopyParameterizedAttributeValue(field, "AXTextMarkerRangeForUIElement" as CFString,
+                field, &rawFieldRange) == .success,
+              let rawFieldRange, CFGetTypeID(rawFieldRange) == AXTextMarkerRangeGetTypeID(),
+              AXUIElementCopyAttributeValue(field, "AXSelectedTextMarkerRange" as CFString, &rawSelection) == .success,
+              let rawSelection, CFGetTypeID(rawSelection) == AXTextMarkerRangeGetTypeID() else { return nil }
+
+        func markerText(_ range: CFTypeRef) -> String? {
+            var text: CFTypeRef?
+            guard AXUIElementCopyParameterizedAttributeValue(field, "AXStringForTextMarkerRange" as CFString,
+                    range, &text) == .success else { return nil }
+            return text as? String
+        }
+
+        let fieldRange = unsafeBitCast(rawFieldRange, to: AXTextMarkerRange.self)
+        let selectedRange = unsafeBitCast(rawSelection, to: AXTextMarkerRange.self)
+        let fieldStart = AXTextMarkerRangeCopyStartMarker(fieldRange)
+        let selectionStart = AXTextMarkerRangeCopyStartMarker(selectedRange)
+        let prefixRange = AXTextMarkerRangeCreate(kCFAllocatorDefault, fieldStart, selectionStart)
+        guard let prefix = markerText(prefixRange) else { return nil }
+        let selected = nativeSelection.length == 0 ? "" : markerText(rawSelection)
+        guard let selected else { return nil }
+        guard let text = markerText(rawFieldRange),
+              text.utf16.count <= 100_000, text.hasPrefix(prefix + selected),
+              TextState.editorTextMatches(text.filter { !$0.isNewline }, value.filter { !$0.isNewline }) else {
+            return nil
+        }
+        let range = NSRange(location: prefix.utf16.count, length: selected.utf16.count)
+        if range != nativeSelection { InputDiagnostics.record("captureMarkerRangeAdjusted") }
+        return TextState(text: text, selection: range)
     }
 
     private static func focused(_ element: AXUIElement) -> Bool? {
@@ -625,7 +681,9 @@ struct TextSnapshot {
             guard !Task.isCancelled, isValid() else { return nil }
             if let current = read() {
                 guard current.field == expected.field else { return nil }
-                consecutiveMatches = current.state.matchesEditorState(expected.state) ? consecutiveMatches + 1 : 0
+                let sameCoordinates = expected.nativeSelection == nil || current.nativeSelection != nil
+                consecutiveMatches = sameCoordinates && current.state.matchesEditorState(expected.state)
+                    ? consecutiveMatches + 1 : 0
                 if consecutiveMatches == 2 { return current }
             } else {
                 consecutiveMatches = 0
@@ -663,7 +721,8 @@ struct TextSnapshot {
             edit = expanded
         }
         guard let after = await TextReplacementTransaction.applyWithFallback(edit, to: snapshot.field,
-                using: AXEditor(edit: edit, selectedBounds: bounds == nil ? selectedBounds : nil)) else {
+                using: AXEditor(edit: edit, requiresMarkers: snapshot.nativeSelection != nil,
+                                selectedBounds: bounds == nil ? selectedBounds : nil)) else {
             InputDiagnostics.record("replacementTransactionFailed")
             return nil
         }
@@ -697,6 +756,7 @@ struct TextSnapshot {
 
     private struct AXEditor: TextEditor {
         let edit: TextReplacement
+        let requiresMarkers: Bool
         let selectedBounds: ((CGRect) -> Void)?
 
         private func isCanvasHost(_ field: TextFieldIdentity) -> Bool {
@@ -704,14 +764,17 @@ struct TextSnapshot {
         }
 
         func supportsDirectReplacement(in field: TextFieldIdentity) -> Bool {
-            if isCanvasHost(field) { return false }
+            // Rich Chromium editors can acknowledge an AX write before it is
+            // visible. Use one verified paste rather than racing two writes.
+            if isCanvasHost(field) || usesMultilineMarkers(pid: field.pid, text: edit.before.text) { return false }
             var settable = DarwinBoolean(false)
             let result = AXUIElementIsAttributeSettable(field.element, kAXSelectedTextAttribute as CFString, &settable)
             return result == .success && settable.boolValue
         }
 
         func read() -> (field: TextFieldIdentity, state: TextState)? {
-            guard let snapshot = capture() else { return nil }
+            guard let snapshot = capture(),
+                  !requiresMarkers || snapshot.nativeSelection != nil else { return nil }
             return (snapshot.field, snapshot.state)
         }
 
@@ -750,7 +813,17 @@ struct TextSnapshot {
                 for event in events { event.postToPid(field.pid) }
                 return true
             }
-            var value = CFRange(location: range.location, length: range.length)
+            var requested = range
+            if usesMultilineMarkers(pid: field.pid, text: edit.before.text) {
+                guard let snapshot = capture(), snapshot.field == field,
+                      !requiresMarkers || snapshot.nativeSelection != nil else { return false }
+                if snapshot.state.selection == range { return true }
+                if let native = snapshot.nativeSelection {
+                    guard let translated = snapshot.state.nativeRange(range, from: native) else { return false }
+                    requested = translated
+                }
+            }
+            var value = CFRange(location: requested.location, length: requested.length)
             guard let axValue = AXValueCreate(.cfRange, &value) else { return false }
             return AXUIElementSetAttributeValue(field.element, kAXSelectedTextRangeAttribute as CFString, axValue) == .success
         }
@@ -764,8 +837,22 @@ struct TextSnapshot {
             // earlier selection read cannot authorize this later write.
             guard !Task.isCancelled, let ready = read(), ready.field == field,
                   ready.state.text == edit.before.text,
-                  ready.state.selection == edit.range else { return false }
+                  ready.state.selection == edit.range,
+                  selectionContentMatches(edit.original, in: field) else { return false }
             return AXUIElementSetAttributeValue(field.element, kAXSelectedTextAttribute as CFString, text as CFString) == .success
+        }
+
+        private func selectionContentMatches(_ expected: String, in field: TextFieldIdentity) -> Bool {
+            guard let selected = string(field.element, kAXSelectedTextAttribute as CFString) else {
+                if usesMultilineMarkers(pid: field.pid, text: edit.before.text) {
+                    InputDiagnostics.record("replacementSelectedTextUnavailable")
+                    return false
+                }
+                return true
+            }
+            let matches = TextState.editorTextMatches(selected, expected)
+            if !matches { InputDiagnostics.record("replacementSelectedTextMismatch") }
+            return matches
         }
 
         private func captureSelectionBounds(in field: TextFieldIdentity) {
@@ -792,7 +879,9 @@ struct TextSnapshot {
             // Its change count prevents restoration over a subsequent user copy.
             guard let lease = PasteboardLease.acquire(text: text) else { return false }
             defer { lease.restore() }
-            guard !Task.isCancelled, lease.isCurrent, let ready = read(), ready.field == field, ready.state == expected else { return false }
+            guard !Task.isCancelled, let ready = read(), ready.field == field,
+                  ready.state == expected, selectionContentMatches(String(expected.text[selectedRange]), in: field),
+                  lease.isCurrent else { return false }
             down.postToPid(field.pid)
             up.postToPid(field.pid)
             let expectedText = expected.text.replacingCharacters(in: selectedRange, with: text)
@@ -802,7 +891,8 @@ struct TextSnapshot {
                 await withCheckedContinuation { continuation in
                     DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(4)) { continuation.resume() }
                 }
-                if let current = read(), current.field == field, current.state.text == expectedText { break }
+                if let current = read(), current.field == field,
+                   TextState.editorTextMatches(current.state.text, expectedText) { break }
             }
             // Dispatch alone is not success: Core verifies text and restores the
             // caret while InputMonitor holds physical input until completion.

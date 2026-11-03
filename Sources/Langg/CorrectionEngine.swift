@@ -18,6 +18,7 @@ import LanggCore
     private enum Command {
         case manual(pid_t, String?)
         case undo(UndoRecord)
+        case observeNativeUndo(TextSnapshot)
     }
     private let settings: AppSettings
     private let replay: InputReplayGate
@@ -124,6 +125,23 @@ import LanggCore
         if let before {
             reconcileHistory(with: before)
             history.expectNativeUndo(in: before.state)
+            if before.state.selection.length == 0 {
+                command = .observeNativeUndo(before)
+                start()
+            }
+        }
+    }
+
+    private func observeNativeUndo(_ before: TextSnapshot, revision: UInt64) async {
+        // The event tap calls us before the editor receives Cmd+Z.
+        for _ in 0..<8 {
+            guard await pause(milliseconds: 8), valid(revision), allowed(pid: before.pid) else { return }
+            guard let after = capture() else { continue }
+            guard after.field == before.field else { return }
+            if after.text != before.text {
+                reconcileHistory(with: after)
+                return
+            }
         }
     }
 
@@ -142,6 +160,7 @@ import LanggCore
                 switch next {
                 case .manual(let pid, let source): await self.correctManual(pid: pid, source: source, revision: revision)
                 case .undo(let record): await self.restore(record, revision: revision)
+                case .observeNativeUndo(let before): await self.observeNativeUndo(before, revision: revision)
                 }
                 return
             }
@@ -237,11 +256,21 @@ import LanggCore
         var following = request.followingText
         let latestWordStart = LayoutConverter.wordCandidates(in: initial.text, caretUTF16: boundary, completed: true).first?.location
         let candidates = AutomaticCorrection.contextualCandidates(in: initial.text, caretUTF16: boundary, excludedWords: settings.excludedWords)
-        var correctedRanges: [NSRange] = []
+        var handledRanges: [NSRange] = []
         for candidate in candidates {
-            guard AutomaticCorrection.isEligibleTarget(candidate), !history.contains(candidate.range),
-                  !correctedRanges.contains(where: { NSIntersectionRange($0, candidate.range).length > 0 }) else { continue }
-            let approved = await backend.shouldCorrect(candidate, in: reference.text)
+            guard !history.contains(candidate.range),
+                  !handledRanges.contains(where: { NSIntersectionRange($0, candidate.range).length > 0 }) else { continue }
+            let approved: Bool
+            switch settings.correctionLearning.decision(for: candidate) {
+            case .keep:
+                handledRanges.append(candidate.range)
+                continue
+            case .correct:
+                approved = true
+            case nil:
+                guard AutomaticCorrection.isEligibleTarget(candidate) else { continue }
+                approved = await backend.shouldCorrect(candidate, in: reference.text)
+            }
             guard current(binding, revision: revision) else { return }
             guard approved, !settings.excludedWords.contains(where: {
                 $0.caseInsensitiveCompare(candidate.original) == .orderedSame ||
@@ -259,7 +288,7 @@ import LanggCore
                     switchSource: candidate.range.location == latestWordStart, automatic: true) else { return }
             reference = result.snapshot
             following = result.followingText ?? request.followingText
-            correctedRanges.append(candidate.range)
+            handledRanges.append(candidate.range)
             // A successful switch ends this source's batch. The next physical
             // input supplies the observed source and starts a fresh binding.
             if backend.currentSourceID != binding.source { return }
@@ -304,7 +333,8 @@ import LanggCore
             expected = appended
             heldFollowing = request.followingText
         }
-        guard let ready = await settled(TextSnapshot(field: snapshot.field, state: expected), revision: revision, source: source),
+        let expectedSnapshot = TextSnapshot(field: snapshot.field, state: expected, nativeSelection: snapshot.nativeSelection)
+        guard let ready = await settled(expectedSnapshot, revision: revision, source: source),
               valid(revision), allowed(pid: snapshot.pid), backend.currentSourceID == source,
               !automatic || (settings.automatic && automaticAllowed(pid: snapshot.pid)),
               let edit = TextReplacement(before: ready.state, range: range, replacement: replacement) else { return nil }
@@ -328,6 +358,9 @@ import LanggCore
               verified.state.matchesEditorState(written.snapshot.state) else { return nil }
         reconcileHistory(with: ready)
         history.remember(edit)
+        if !automatic {
+            settings.correctionLearning.remember(original: edit.original, replacement: edit.replacement, decision: .correct)
+        }
         undo = UndoRecord(edit: edit, after: written.snapshot, previousSourceID: source)
         InputDiagnostics.record("replacementSucceeded")
         if switchSource, backend.currentSourceID == source {
@@ -447,6 +480,7 @@ import LanggCore
               let verified = capture(), verified.field == ready.field,
               verified.state.matchesEditorState(restored.snapshot.state) else { return }
         reconcileHistory(with: restored.snapshot)
+        settings.correctionLearning.remember(original: record.edit.original, replacement: record.edit.replacement, decision: .keep)
         history.rememberUnchanged(NSRange(location: record.edit.range.location, length: record.edit.original.utf16.count), in: restored.snapshot.text)
         if settings.undoRestoresLayout, let id = record.previousSourceID, backend.currentSourceID == source {
             _ = replay.changeInputSource(transform: { event in
@@ -462,6 +496,9 @@ import LanggCore
             history = CorrectionHistory()
             historyField = snapshot.field
         }
-        history.reconcile(with: snapshot.text)
+        let learning = settings.correctionLearning
+        history.reconcile(with: snapshot.text) { original, replacement in
+            learning.remember(original: original, replacement: replacement, decision: .keep)
+        }
     }
 }

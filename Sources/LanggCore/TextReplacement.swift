@@ -16,6 +16,21 @@ public struct TextState: Equatable, Sendable {
                          selection: NSRange(location: selection.location + input.utf16.count, length: 0))
     }
 
+    /// A marker gives a measured offset for this paragraph. Do not extend
+    /// that offset across a line break, where Chromium may count differently.
+    public func nativeRange(_ range: NSRange, from nativeSelection: NSRange) -> NSRange? {
+        guard LayoutConverter.validatedRange(range, in: text) != nil,
+              (0...text.utf16.count).contains(nativeSelection.location),
+              nativeSelection.length == selection.length else { return nil }
+        let start = min(selection.location, range.location)
+        let end = max(NSMaxRange(selection), NSMaxRange(range))
+        guard let span = LayoutConverter.substring(text, range: NSRange(location: start, length: end - start)),
+              !span.contains(where: \.isNewline) else { return nil }
+        let location = nativeSelection.location + range.location - selection.location
+        guard location >= 0 else { return nil }
+        return NSRange(location: location, length: range.length)
+    }
+
     /// Contenteditable fields can expose a nonbreaking space for a physical
     /// space key, or a curly apostrophe for the physical quote key.
     /// Keep the captured text and every UTF-16 offset intact.
@@ -91,10 +106,11 @@ public extension TextEditor {
 
         // AX setters can report success before a web editor exposes the new
         // selection. Own one selection phase, and clean it up on every exit.
-        _ = editor.select(edit.range, in: field)
+        let selectionAccepted = editor.select(edit.range, in: field)
         let result = await applySelected(edit, field: field, selected: selected, editor: editor)
         if result == nil {
-            await restoreSelectionAfterAttempt(edit, field: field, selected: selected, editor: editor)
+            await restoreSelectionAfterAttempt(edit, field: field, selected: selected,
+                                               selectionAccepted: selectionAccepted, editor: editor)
         }
         return result
     }
@@ -147,8 +163,8 @@ public extension TextEditor {
             // invalidates the attempt; a missing read uses the existing budget.
             if let current = editor.read() {
                 guard current.field == field else { return false }
-                if current.state == expected { return true }
-                guard current.state == previous else { return false }
+                if current.state.matchesEditorState(expected) { return true }
+                guard current.state.matchesEditorState(previous) else { return false }
             }
             if attempt < 15 { await waitForAXUpdate() }
         }
@@ -160,10 +176,10 @@ public extension TextEditor {
         for attempt in 0..<attempts {
             if let current = editor.read() {
                 guard current.field == field else { return false }
-                if current.state.text == expected { return true }
+                if TextState.editorTextMatches(current.state.text, expected) { return true }
                 // A selection may briefly collapse while contenteditable commits
                 // its edit. Do not treat that intermediate AX read as a failure.
-                guard current.state.text == previous.text else { return false }
+                guard TextState.editorTextMatches(current.state.text, previous.text) else { return false }
             }
             if attempt + 1 < attempts { await waitForAXUpdate() }
         }
@@ -172,26 +188,38 @@ public extension TextEditor {
 
     private static func finishAfterAttempt<Editor: TextEditor>(_ edit: TextReplacement, field: Editor.Field,
                                                              editor: Editor) async -> TextState? {
-        guard let current = editor.read(), current.field == field, current.state.text == edit.after.text else { return nil }
+        guard let current = editor.read(), current.field == field,
+              TextState.editorTextMatches(current.state.text, edit.after.text) else { return nil }
         let insertion = NSRange(location: edit.range.location + edit.replacement.utf16.count, length: 0)
         let replacedSelection = NSRange(location: edit.range.location, length: edit.replacement.utf16.count)
         guard [insertion, replacedSelection, edit.after.selection].contains(current.state.selection) else { return nil }
-        if current.state == edit.after { return current.state }
+        if current.state.selection == edit.after.selection { return current.state }
         _ = editor.select(edit.after.selection, in: field)
-        return await waitForState(edit.after, allowing: current.state, field: field, editor: editor) ? edit.after : nil
+        guard await waitForState(edit.after, allowing: current.state, field: field, editor: editor),
+              let restored = editor.read(), restored.field == field,
+              restored.state.matchesEditorState(edit.after) else { return nil }
+        return restored.state
     }
 
     private static func restoreSelectionAfterAttempt<Editor: TextEditor>(_ edit: TextReplacement, field: Editor.Field,
-                                                                       selected: TextState, editor: Editor) async {
-        guard let current = editor.read(), current.field == field else { return }
-        if current.state == selected || current.state == edit.before {
+                                                                       selected: TextState, selectionAccepted: Bool,
+                                                                       editor: Editor) async {
+        var snapshot = editor.read()
+        for _ in 0..<3 where snapshot == nil {
+            // A rich editor can briefly lose its text markers after selection.
+            await waitForAXUpdate()
+            snapshot = editor.read()
+        }
+        guard let current = snapshot, current.field == field else { return }
+        let misplacedSelection = selectionAccepted && !Task.isCancelled &&
+            current.state.text == edit.before.text && current.state.selection.length > 0
+        if current.state == selected || current.state == edit.before || misplacedSelection {
             // Reassert the original caret even when AX still exposes the old
             // state: an earlier accepted selection may still be in flight.
             _ = editor.select(edit.before.selection, in: field)
-            _ = await waitForState(edit.before, allowing: selected, field: field, editor: editor)
-        } else if current.state.text == edit.after.text {
-            // A confirmed insertion still needs its caret restored when the
-            // caller cancelled while waiting for the asynchronous editor.
+            let previous = current.state == edit.before ? selected : current.state
+            _ = await waitForState(edit.before, allowing: previous, field: field, editor: editor)
+        } else if TextState.editorTextMatches(current.state.text, edit.after.text) {
             _ = await finishAfterAttempt(edit, field: field, editor: editor)
         }
     }

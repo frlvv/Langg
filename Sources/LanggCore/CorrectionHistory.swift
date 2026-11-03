@@ -20,7 +20,7 @@ public struct CorrectionHistory {
         nativeUndo = state.selection.length == 0 ? state : nil
     }
 
-    public mutating func reconcile(with updated: String) {
+    public mutating func reconcile(with updated: String, onNativeUndo: (String, String) -> Void = { _, _ in }) {
         guard updated != text else { return }
         if let before = nativeUndo {
             nativeUndo = nil
@@ -36,22 +36,26 @@ public struct CorrectionHistory {
                    updated.hasPrefix(prefix), updated.hasSuffix(suffix) {
                     reconcile(with: inverse.after.text)
                     reconcile(with: updated)
+                    onNativeUndo(original, entry.text)
                     return
                 }
             }
             var trial = before
-            var inverses: [TextState] = []
+            var inverses: [TextReplacement] = []
             for entry in entries.sorted(by: { $0.range.location > $1.range.location }) {
                 guard let original = entry.original,
                       let inverse = TextReplacement(before: trial, range: entry.range, replacement: original) else { continue }
                 trial = inverse.after
-                inverses.append(trial)
+                inverses.append(inverse)
                 guard inverses.count > 1,
                       let caret = LayoutConverter.validatedRange(trial.selection, in: trial.text),
                       updated.utf16.count >= trial.text.utf16.count,
                       updated.hasPrefix(trial.text[..<caret.lowerBound]),
                       updated.hasSuffix(trial.text[caret.upperBound...]) else { continue }
-                for state in inverses { reconcile(with: state.text) }
+                for inverse in inverses {
+                    reconcile(with: inverse.after.text)
+                    onNativeUndo(inverse.replacement, inverse.original)
+                }
                 reconcile(with: updated)
                 return
             }
